@@ -1,0 +1,14 @@
+# Python / build output
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+installer_output/
+*.spec.bak
+# bundled tools are downloaded by setup/build scripts
+bin/*.exe
+# local test media
+*.mp4
+*.mov
+*.log
