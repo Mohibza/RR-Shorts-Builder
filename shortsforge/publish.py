@@ -17,7 +17,6 @@ import base64
 import hashlib
 import http.server
 import json
-import os
 import secrets
 import socket
 import threading
@@ -30,6 +29,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .config import data_dir
+from .secure import dpapi
 
 ACCOUNTS_FILE = data_dir() / "accounts.bin"
 GRAPH = "https://graph.facebook.com/v25.0"
@@ -65,27 +65,7 @@ class PublishError(RuntimeError):
 
 
 # ================================================================ secure storage (Windows DPAPI)
-def _dpapi(data: bytes, protect: bool) -> bytes:
-    if os.name != "nt":
-        return data
-    import ctypes
-    from ctypes import wintypes
-
-    class BLOB(ctypes.Structure):
-        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
-
-    buf = ctypes.create_string_buffer(data, len(data))
-    inp = BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
-    out = BLOB()
-    fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
-    if not fn(ctypes.byref(inp), None, None, None, None, 0, ctypes.byref(out)):
-        raise OSError("Windows could not encrypt/decrypt the saved accounts")
-    try:
-        return ctypes.string_at(out.pbData, out.cbData)
-    finally:
-        ctypes.windll.kernel32.LocalFree(out.pbData)
-
-
+_dpapi = dpapi
 _lock = threading.RLock()
 
 
