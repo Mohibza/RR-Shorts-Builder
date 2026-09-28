@@ -136,6 +136,24 @@ def probe(path: str) -> dict:
 _FFMPEG_NOISE = ("Loading font file", "Using font provider", "Added subtitle file", "fontselect:", "Glyph 0x")
 
 
+MAX_CMDLINE = 30000   # Windows refuses command lines over 32767 characters (WinError 206)
+
+
+@lru_cache(maxsize=1)
+def _graph_file_option() -> str:
+    """Option that reads -filter_complex from a file: '-/filter_complex' (FFmpeg 7+, the old one is gone in 8)
+    or '-filter_complex_script' (FFmpeg 6 and older)."""
+    try:
+        out = subprocess.run([find_ffmpeg(), "-version"], capture_output=True, text=True, timeout=20,
+                             creationflags=NO_WINDOW).stdout
+        m = re.search(r"ffmpeg version n?(\d+)\.", out)
+        if m and int(m[1]) < 7:
+            return "-filter_complex_script"
+    except Exception:
+        pass
+    return "-/filter_complex"   # current releases and git builds ("N-12345-...")
+
+
 def run_ffmpeg(
     args: list[str],
     duration: float,
@@ -143,7 +161,28 @@ def run_ffmpeg(
     cancel: Optional[threading.Event] = None,
     cwd: Optional[str] = None,
 ) -> None:
-    """Run ffmpeg with args (without the binary), reporting progress 0..1."""
+    """Run ffmpeg with args (without the binary), reporting progress 0..1.
+
+    A filter graph too long for the command line (long Shorts with many camera moves) is passed as a file."""
+    graph_file = None
+    if "-filter_complex" in args and len(subprocess.list2cmdline(args)) > MAX_CMDLINE:
+        import tempfile
+        i = args.index("-filter_complex")
+        fd, graph_file = tempfile.mkstemp(prefix="rrshorts_graph_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(args[i + 1])
+        args = args[:i] + [_graph_file_option(), graph_file] + args[i + 2:]
+    try:
+        _run_ffmpeg(args, duration, on_progress, cancel, cwd)
+    finally:
+        if graph_file:
+            try:
+                os.unlink(graph_file)
+            except OSError:
+                pass
+
+
+def _run_ffmpeg(args: list[str], duration: float, on_progress, cancel, cwd) -> None:
     cmd = [find_ffmpeg(), "-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats"] + args
     proc = subprocess.Popen(
         cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

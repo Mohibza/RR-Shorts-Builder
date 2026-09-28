@@ -8,7 +8,7 @@ import unittest
 
 from shortsforge.facetrack import x_expression
 from shortsforge.renderer import _camera_at
-from shortsforge.utils import ToolMissing, find_ffmpeg
+from shortsforge.utils import ToolMissing, find_ffmpeg, run_ffmpeg
 
 
 def busy_path(n: int) -> list:
@@ -41,6 +41,18 @@ class XExpressionTest(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertNotIn("Invalid argument", r.stderr)
         self.assertEqual(r.returncode, 0, r.stderr[-500:])
+
+    def test_long_short_graph_beyond_windows_command_limit(self):
+        # a 180 s Short of a busy stream: ~900 camera moves -> graph far over Windows' 32767-char limit
+        try:
+            find_ffmpeg()
+        except ToolMissing:
+            self.skipTest("ffmpeg not installed")
+        expr = x_expression(busy_path(900))
+        self.assertGreater(len(expr), 40000)
+        run_ffmpeg(["-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=0.3",
+                    "-filter_complex", f"[0:v]crop=w=606:h=1080:x='{expr}':y=0[v]", "-map", "[v]",
+                    "-f", "null", "-"], 0.3)
 
 
 if __name__ == "__main__":
