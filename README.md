@@ -9,6 +9,10 @@ Paste a YouTube link and Rebels Revolt Shorts turns the long video into ready-to
 5. **Styles every Short differently**: animated captions, hook titles, end cards, color grades, camera motion, intro effects, progress bar, watermark, part labels, and optional background music that gets quieter under speech
 6. **Saves** MP4 + thumbnail + title/description/hashtags text for each Short, ready for you to review and upload
 
+## What's new in 2.1.2
+
+- **ChatGPT as the AI editor.** Paste an OpenAI API key in Settings → AI editor and pick "ChatGPT AI editor". Model "auto" uses the best GPT model your key can use (a fast "mini" model first). Gemini (free), Claude and the offline director still work as before.
+
 ## What's new in 2.1.1
 
 - Music downloads and **Make music** work even when Windows protects your Music folder (Controlled folder access). The app switches to a folder it may write to (`%USERPROFILE%\RR Shorts\Music`) and copies your existing tracks over. The folder is shown on the Music page and can be changed in Settings.
@@ -211,6 +215,6 @@ Run `build_installer.bat`. It creates `dist\RRShortsBuilder\RRShortsBuilder.exe`
 - **FFmpeg missing**: run `setup.bat` again, or download it from gyan.dev and point Settings to `ffmpeg.exe`
 - **Transcription is slow**: choose *Fast (base)* quality, or turn on the NVIDIA GPU option
 - **Wrong language detected**: pick the spoken language instead of Auto-detect
-- **Logs**: `%APPDATA%\RRShortsBuilder\logs\jobs.log` has every job, error and failed FFmpeg command (startup crashes: `rrshorts.log`). The Create page also has a *Show log* button
+- **Logs**: `%APPDATA%\RRShortsBuilder\rrshorts.log`. The Create page also has a *Show log* button
 
 Only process videos you own or have the rights to reuse. Use royalty-free music, and check each track's licence (the Music page shows it). Even free tracks can occasionally get an automated Content ID claim; if one does, dispute it with the licence link.

@@ -54,7 +54,7 @@ function StatusPill() {
       <div className="ss-row sub">
         <span className={st.ffmpeg ? "ok" : "bad"}>FFmpeg</span>·
         <span className={st.yt_login ? "ok" : "warn"}>YouTube</span>·
-        <span className={st.ai !== "offline" ? "ok" : "muted"}>{st.ai === "offline" ? "Offline AI" : st.ai === "gemini" ? "Gemini" : "Claude"}</span>
+        <span className={st.ai !== "offline" ? "ok" : "muted"}>{st.ai === "offline" ? "Offline AI" : st.ai === "gemini" ? "Gemini" : st.ai === "openai" ? "ChatGPT" : "Claude"}</span>
       </div>
       {(st.watching > 0 || st.uploads_waiting > 0) && (
         <div className="ss-row sub auto"><Icon name="zap" size={12} /> Autopilot: {[st.watching ? `${st.watching} channel${st.watching > 1 ? "s" : ""}` : "", st.uploads_waiting ? `${st.uploads_waiting} upload${st.uploads_waiting > 1 ? "s" : ""} queued` : ""].filter(Boolean).join(", ")}</div>

@@ -169,6 +169,20 @@ class SettingsPage(QWidget):
         ch.addWidget(tc)
         g.addWidget(field("Anthropic (Claude) API key", cr), 1, 0)
         g.addWidget(field("Claude model", self.model), 1, 1)
+        self.oai_key = QLineEdit(getattr(s, "openai_api_key", ""))
+        self.oai_key.setEchoMode(QLineEdit.Password)
+        self.oai_key.setPlaceholderText("sk-…  (optional, paid)")
+        self.oai_model = QLineEdit(getattr(s, "openai_model", "auto") or "auto")
+        to = QPushButton(" Test")
+        to.setIcon(theme.icon("check"))
+        to.clicked.connect(lambda: self.test_key("openai"))
+        orow = QWidget()
+        oh = QHBoxLayout(orow)
+        oh.setContentsMargins(0, 0, 0, 0)
+        oh.addWidget(self.oai_key, 1)
+        oh.addWidget(to)
+        g.addWidget(field("OpenAI (ChatGPT) API key", orow), 2, 0)
+        g.addWidget(field("ChatGPT model", self.oai_model), 2, 1)
         g.setColumnStretch(0, 3)
         g.setColumnStretch(1, 1)
         c.lay.addLayout(g)
@@ -355,9 +369,9 @@ class SettingsPage(QWidget):
 
     def test_key(self, provider: str = "gemini"):
         from shortsforge.llm import test_key
-        key = (self.gem_key if provider == "gemini" else self.api_key).text().strip()
-        model = (self.gem_model if provider == "gemini" else self.model).text().strip() or \
-            ("auto" if provider == "gemini" else "claude-sonnet-5")
+        key = {"gemini": self.gem_key, "openai": self.oai_key}.get(provider, self.api_key).text().strip()
+        model = {"gemini": self.gem_model, "openai": self.oai_model}.get(provider, self.model).text().strip() or \
+            ("claude-sonnet-5" if provider == "claude" else "auto")
         if not key:
             self.key_status.setText("Paste a key first.")
             return
@@ -366,7 +380,8 @@ class SettingsPage(QWidget):
         self.key_status.repaint()
         try:
             msg = test_key(provider, key, model)
-            self.key_status.setText(f"✓ {'Gemini' if provider == 'gemini' else 'Claude'}: {msg}. Press Save settings.")
+            nice = {"gemini": "Gemini", "openai": "ChatGPT"}.get(provider, "Claude")
+            self.key_status.setText(f"✓ {nice}: {msg}. Press Save settings.")
             self.key_status.setStyleSheet(f"color: {theme.GOOD};")
         except Exception as e:
             self.key_status.setText(f"✗ {e}")
@@ -536,6 +551,8 @@ class SettingsPage(QWidget):
         if s.gemini_api_key and not getattr(s, "anthropic_api_key", "") and s.clip_picker == "local":
             s.clip_picker = "gemini"
         s.claude_model = self.model.text().strip() or "claude-sonnet-5"
+        s.openai_api_key = self.oai_key.text().strip()
+        s.openai_model = self.oai_model.text().strip() or "auto"
         self._save_watch()
         set_ffmpeg_override(s.ffmpeg_path)
         s.save()

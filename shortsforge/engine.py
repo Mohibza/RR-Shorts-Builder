@@ -151,7 +151,8 @@ class Engine:
                 "uploads_waiting": waiting, "watching": len(s.watch_channels or []) if s.watch_enabled else 0,
                 "auto_upload": bool(s.auto_upload), "ai": s.clip_picker if (
                     (s.clip_picker == "gemini" and s.gemini_api_key) or
-                    (s.clip_picker == "claude" and s.anthropic_api_key)) else "offline",
+                    (s.clip_picker == "claude" and s.anthropic_api_key) or
+                    (s.clip_picker == "openai" and getattr(s, "openai_api_key", ""))) else "offline",
                 "license": licensing.enabled()}
 
     # ------------------------------------------------------------ analyse

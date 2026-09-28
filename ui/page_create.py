@@ -28,7 +28,8 @@ SFX_LEVELS = [("auto", "Auto (matches each clip)"), ("off", "Off"), ("subtle", "
 QUALITY = [("auto", "Auto · best for this PC"), ("tiny", "Fastest · tiny (75 MB)"), ("base", "Fast · base (145 MB)"),
            ("small", "Balanced · small (484 MB)"), ("medium", "Accurate · medium (1.5 GB)"),
            ("large-v3-turbo", "Best · large-v3 turbo (1.6 GB, GPU)")]
-PICKERS = [("gemini", "Gemini AI editor (free key)"), ("claude", "Claude AI editor"), ("local", "Offline director")]
+PICKERS = [("gemini", "Gemini AI editor (free key)"), ("openai", "ChatGPT AI editor"), ("claude", "Claude AI editor"),
+           ("local", "Offline director")]
 
 
 def combo(items: list[tuple[str, str]], current: str) -> QComboBox:
@@ -341,12 +342,14 @@ class CreatePage(QWidget):
     # ------------------------------------------------------------------
     def update_ai_chip(self, *_):
         p = self.picker.currentData()
-        key = {"gemini": getattr(self.s, "gemini_api_key", ""), "claude": getattr(self.s, "anthropic_api_key", "")}
+        key = {"gemini": getattr(self.s, "gemini_api_key", ""), "claude": getattr(self.s, "anthropic_api_key", ""),
+               "openai": getattr(self.s, "openai_api_key", "")}
+        nice = {"gemini": "Gemini", "claude": "Claude", "openai": "ChatGPT"}.get(p, "")
         if p in key and key[p].strip():
-            self.ai_chip.setText(f"●  AI editor: {'Gemini' if p == 'gemini' else 'Claude'}")
+            self.ai_chip.setText(f"●  AI editor: {nice}")
             self.ai_chip.setProperty("state", "on")
         elif p in key:
-            self.ai_chip.setText(f"●  Add a {'Gemini' if p == 'gemini' else 'Claude'} key in Settings")
+            self.ai_chip.setText(f"●  Add a {nice} key in Settings")
             self.ai_chip.setProperty("state", "warn")
         else:
             self.ai_chip.setText("●  Offline director")
@@ -400,7 +403,8 @@ class CreatePage(QWidget):
 
     def submit(self):
         p = self.picker.currentData()
-        need = {"gemini": ("gemini_api_key", "Gemini"), "claude": ("anthropic_api_key", "Claude")}.get(p)
+        need = {"gemini": ("gemini_api_key", "Gemini"), "claude": ("anthropic_api_key", "Claude"),
+                "openai": ("openai_api_key", "ChatGPT")}.get(p)
         if need and not getattr(self.s, need[0], "").strip():
             box = QMessageBox(self)
             box.setWindowTitle(f"{need[1]} key needed")

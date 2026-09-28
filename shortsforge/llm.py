@@ -1,4 +1,4 @@
-"""Tiny clients for the AI editors (Gemini free tier / Claude), no extra packages needed.
+"""Tiny clients for the AI editors (Gemini free tier / Claude / ChatGPT), no extra packages needed.
 
 Gemini: the best available *Flash* model is discovered from your key (Google renames models often),
 cached for a day, and we fall back to Flash-Lite when a daily quota is hit.
@@ -132,6 +132,53 @@ def claude_generate(prompt: str, key: str, model: str = "claude-sonnet-5", max_t
     return "".join(b.get("text", "") for b in d.get("content", []) if b.get("type") == "text")
 
 
+# ------------------------------------------------------------------------------------------------ OpenAI (ChatGPT)
+OPENAI_API = "https://api.openai.com/v1"
+_OAI_CACHE = data_dir() / "openai_models.json"
+# preferred models, best value first (fast + cheap + good at JSON); "auto" picks the first one the key can use
+OPENAI_PREFER = [r"^gpt-5(\.\d+)?-mini$", r"^gpt-5(\.\d+)?$", r"^gpt-4\.1-mini$", r"^gpt-4o-mini$", r"^gpt-4\.1$",
+                 r"^gpt-4o$"]
+
+
+def openai_model(key: str, refresh: bool = False) -> str:
+    if not refresh and _OAI_CACHE.exists():
+        try:
+            c = json.loads(_OAI_CACHE.read_text(encoding="utf-8"))
+            if time.time() - c.get("t", 0) < 86400 and c.get("k") == key[-6:]:
+                return c["m"]
+        except Exception:
+            pass
+    d = _http(f"{OPENAI_API}/models", headers={"authorization": f"Bearer {key.strip()}"}, timeout=30)
+    names = sorted((m.get("id", "") for m in d.get("data", [])), reverse=True)
+    pick = next((n for rx in OPENAI_PREFER for n in names if re.match(rx, n)), "gpt-4o-mini")
+    try:
+        _OAI_CACHE.write_text(json.dumps({"t": time.time(), "k": key[-6:], "m": pick}), encoding="utf-8")
+    except OSError:
+        pass
+    return pick
+
+
+def openai_generate(prompt: str, key: str, model: str = "auto", json_mode: bool = True, timeout: int = 240,
+                    log=None) -> str:
+    key = key.strip()
+    m = model if model and model != "auto" else openai_model(key)
+    body = {"model": m, "messages": [{"role": "user", "content": prompt}]}
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    hdr = {"authorization": f"Bearer {key}"}
+    try:
+        d = _http(f"{OPENAI_API}/chat/completions", body, hdr, timeout=timeout)
+    except LLMError as e:
+        if "response_format" in str(e) and json_mode:     # model without JSON mode: plain reply, parsed later
+            body.pop("response_format", None)
+            d = _http(f"{OPENAI_API}/chat/completions", body, hdr, timeout=timeout)
+        else:
+            raise
+    if log:
+        log(f"ChatGPT model used: {m}")
+    return ((d.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+
+
 # ------------------------------------------------------------------------------------------------ facade
 class AI:
     """Whichever AI editor the user configured; `ask()` returns text (JSON when asked)."""
@@ -146,15 +193,19 @@ class AI:
             return cls("gemini", s.gemini_api_key, getattr(s, "gemini_model", "auto") or "auto", log)
         if p == "claude" and getattr(s, "anthropic_api_key", "").strip():
             return cls("claude", s.anthropic_api_key, getattr(s, "claude_model", "claude-sonnet-5"), log)
+        if p == "openai" and getattr(s, "openai_api_key", "").strip():
+            return cls("openai", s.openai_api_key, getattr(s, "openai_model", "auto") or "auto", log)
         return None
 
     @property
     def label(self) -> str:
-        return "Gemini" if self.provider == "gemini" else "Claude"
+        return {"gemini": "Gemini", "openai": "ChatGPT"}.get(self.provider, "Claude")
 
     def ask(self, prompt: str, json_mode: bool = True, timeout: int = 200) -> str:
         if self.provider == "gemini":
             return gemini_generate(prompt, self.key, self.model, json_mode, timeout, self.log)
+        if self.provider == "openai":
+            return openai_generate(prompt, self.key, self.model, json_mode, timeout, self.log)
         return claude_generate(prompt, self.key, self.model, timeout=timeout, log=self.log)
 
     def ask_json(self, prompt: str, timeout: int = 200) -> dict:
@@ -173,5 +224,9 @@ def test_key(provider: str, key: str, model: str = "auto") -> str:
             raise LLMError("key works but no Gemini Flash model is available to it")
         reply = gemini_generate('Reply with JSON {"ok": true}', key, model, True, 30)
         return f"Key works · model {ms['flash'][0] if ms['flash'] else ms['lite'][0]} · reply {reply.strip()[:30]}"
+    if provider == "openai":
+        m = model if model and model != "auto" else openai_model(key, refresh=True)
+        reply = openai_generate('Reply with JSON {"ok": true}', key, m, True, 60)
+        return f"Key works · model {m} · reply {reply.strip()[:30]}"
     reply = claude_generate("Reply with the single word: ready", key, model, max_tokens=10, timeout=30)
     return f"Key works · reply {reply.strip()[:20]}"

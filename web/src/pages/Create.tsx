@@ -13,7 +13,7 @@ export const CAPTION_LANGS: [string, string][] = [["roman", "Roman Urdu / Englis
   ["auto", "Original script"], ["ur", "Urdu script"], ["hi", "Hindi script"]];
 export const QUALITY: [string, string][] = [["auto", "Auto (turbo on NVIDIA GPU, small on CPU)"], ["tiny", "Fastest (tiny)"], ["base", "Fast (base)"], ["small", "Balanced (small)"],
   ["medium", "Accurate (medium)"], ["large-v3-turbo", "Best (large-v3 turbo, GPU)"]];
-export const PICKERS: [string, string][] = [["gemini", "Gemini AI editor (free key)"], ["claude", "Claude AI editor"], ["local", "Offline director"]];
+export const PICKERS: [string, string][] = [["gemini", "Gemini AI editor (free key)"], ["openai", "ChatGPT AI editor"], ["claude", "Claude AI editor"], ["local", "Offline director"]];
 const LENGTHS: [string, string][] = [["short", "15–30s"], ["mid", "20–45s"], ["long", "30–59s"], ["max", "45–90s"]];
 const LEN_VALUES: Record<string, [number, number]> = { short: [15, 30], mid: [20, 45], long: [30, 59], max: [45, 90] };
 

@@ -83,6 +83,7 @@ export function SettingsPage() {
 function AiSection({ s, set }: { s: any; set: (p: any) => void }) {
   const [gk, setGk] = useState(s.gemini_api_key || "");
   const [ck, setCk] = useState(s.anthropic_api_key || "");
+  const [ok, setOk] = useState(s.openai_api_key || "");
   const [test, setTest] = useState<Record<string, string>>({});
   const run = async (provider: string, key: string, model: string) => {
     setTest((t) => ({ ...t, [provider]: "…" }));
@@ -100,6 +101,13 @@ function AiSection({ s, set }: { s: any; set: (p: any) => void }) {
           <Btn onClick={() => { set({ gemini_api_key: gk.trim() }); run("gemini", gk.trim(), s.gemini_model || "auto"); }}>Save & test</Btn></div>
         {test.gemini && <p className="small">{test.gemini}</p>}
         <Field label="Model"><Text value={s.gemini_model || "auto"} onChange={(v) => set({ gemini_model: v || "auto" })} /></Field>
+      </div>
+      <div className="key-card glass-2">
+        <div className="row gap"><b>ChatGPT</b><Chip>OpenAI</Chip><a className="linkbtn small" href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">Get a key</a></div>
+        <div className="row gap"><Text type="password" value={ok} onChange={setOk} placeholder="Paste OpenAI API key (sk-…)" />
+          <Btn onClick={() => { set({ openai_api_key: ok.trim(), ...(ok.trim() && s.clip_picker !== "openai" && !s.gemini_api_key ? { clip_picker: "openai" } : {}) }); run("openai", ok.trim(), s.openai_model || "auto"); }}>Save & test</Btn></div>
+        {test.openai && <p className="small">{test.openai}</p>}
+        <Field label="Model" hint="auto = the best GPT model your key can use (a fast 'mini' model first)"><Text value={s.openai_model || "auto"} onChange={(v) => set({ openai_model: v || "auto" })} /></Field>
       </div>
       <div className="key-card glass-2">
         <div className="row gap"><b>Claude</b><a className="linkbtn small" href="https://console.anthropic.com/" target="_blank" rel="noreferrer">Get a key</a></div>
