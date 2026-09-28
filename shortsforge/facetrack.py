@@ -161,8 +161,17 @@ def camera_path(track: dict, src_w: int, crop_w: int, duration: float,
     return _rdp(pts, eps=max(2.0, src_w * 0.004))
 
 
+def _balanced_sum(terms: list[str]) -> str:
+    """a+b+c+... as a balanced tree. FFmpeg parses a flat sum left-deep (one level per term) and rejects
+    expressions nested ~100 deep with EINVAL, which broke Smart Crop on busy clips with many camera moves."""
+    if len(terms) == 1:
+        return terms[0]
+    mid = len(terms) // 2
+    return f"({_balanced_sum(terms[:mid])}+{_balanced_sum(terms[mid:])})"
+
+
 def x_expression(path: list[tuple[float, float]]) -> str:
-    """Piecewise-linear ffmpeg expression of t for the crop x position (flat, no nesting)."""
+    """Piecewise-linear ffmpeg expression of t for the crop x position (nesting depth ~log2 of the moves)."""
     if len(path) == 1 or all(abs(p[1] - path[0][1]) < 1 for p in path):
         return str(int(path[0][1]))
     terms = []
@@ -173,4 +182,4 @@ def x_expression(path: list[tuple[float, float]]) -> str:
         terms.append(f"gte(t,{t0:.3f})*lt(t,{t1:.3f})*({x0:.1f}{slope:+.3f}*(t-{t0:.3f}))")
     last_x = path[-1][1]
     terms.append(f"gte(t,{path[-1][0]:.3f})*{last_x:.1f}")
-    return "+".join(terms)
+    return _balanced_sum(terms)
