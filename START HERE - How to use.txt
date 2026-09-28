@@ -1,0 +1,202 @@
+===============================================================
+  RR SHORTS BUILDER - START HERE
+===============================================================
+
+This app turns a long video (a YouTube link, a stream or a video file) into
+ready-to-upload vertical Shorts (9:16) for YouTube Shorts, TikTok and Reels.
+It adds captions, a hook heading, sound effects and a title, description and
+hashtags for each Short.
+
+You need: Windows 10 or 11, internet, and about 5 GB of free disk space.
+An NVIDIA graphics card makes it faster, but it is not required.
+
+
+---------------------------------------------------------------
+  1. INSTALL (only once)
+---------------------------------------------------------------
+
+1. Unzip this folder somewhere simple, for example:  C:\RRShortsBuilder
+   - Do NOT run it from inside the zip. Unzip it first
+     (right-click the zip -> "Extract All").
+   - Avoid OneDrive, Desktop or Documents folders if you can.
+
+2. Double-click  setup.bat
+   - It installs Python, FFmpeg and everything else by itself.
+     The first time takes 5-15 minutes.
+   - If Windows says "Windows protected your PC": click "More info",
+     then "Run anyway".
+   - If it says "Python was installed. Please CLOSE this window and run
+     setup.bat again", do exactly that.
+   - If it asks about NVIDIA GPU acceleration: type  y  and press Enter if
+     you have an NVIDIA card, otherwise  n.
+   - When it says "Setup complete!", press any key to close it.
+
+
+---------------------------------------------------------------
+  2. WHICH FILE TO OPEN
+---------------------------------------------------------------
+
+After setup, open the app with EITHER of these:
+   - the "RR Shorts Builder" icon on your Desktop, or
+   - run.bat  in this folder
+
+You don't need to open setup.bat again unless something breaks.
+(Ignore the other files: build_*.bat, installer.iss and push_to_github.bat
+are for the developer.)
+
+
+---------------------------------------------------------------
+  3. FIRST TIME: ADD THE FREE AI KEY (important for quality)
+---------------------------------------------------------------
+
+Without a key, the app picks moments with a simple offline method.
+The results are OK, but the chosen moments and titles are much weaker.
+
+1. In the app, go to  Settings -> AI editor
+2. Click "Get a free Gemini key", sign in with a Google account and
+   create a key
+3. Paste the key into the app and save
+
+It is free. The app uses only about 2 requests per video.
+
+
+---------------------------------------------------------------
+  4. MAKE SHORTS
+---------------------------------------------------------------
+
+1. Go to the  Create  page
+2. Paste a YouTube link (or drag a video file onto the box)
+3. Press  Generate Shorts
+4. Wait. A 15-minute video takes about 10 minutes. A 3-hour stream can
+   take 1 hour or more on a normal PC.
+5. Go to the  Library  page to watch each Short and copy its title,
+   description and hashtags. "Restyle" lets you change the look and
+   re-render.
+
+Your Shorts are saved in:  C:\Users\<your name>\RR Shorts\<video title>\
+For each Short you get:
+   01 - <title>.mp4   the video (1080x1920)
+   01 - <title>.jpg   thumbnail
+   01 - <title>.txt   title, description and tags to copy when uploading
+
+Before uploading, ALWAYS watch each Short once. Delete any that start in
+the middle of a sentence or don't make sense on their own.
+
+
+---------------------------------------------------------------
+  5. DEFAULT SETTINGS (what the app does if you change nothing)
+---------------------------------------------------------------
+
+Create page
+  Shorts per video .......... 5
+  Length of each Short ...... 20 to 59 seconds
+  Viral moment picker ....... Gemini AI editor (uses Offline director if no key)
+  Spoken language ........... Auto-detect
+  Remove pauses ............. ON  (cuts silent gaps for faster pacing)
+  Teaser opening ............ ON  (may open on the best line first)
+  Caption text .............. Roman Urdu / English  (English speech stays English)
+  Caption style ............. Random mix (different in every Short)
+  Caption position .......... Lower third
+  Transcription quality ..... Balanced (small)
+  Framing ................... Auto (follows the face, or blurred background)
+  Watermark ................. empty
+  End card text ............. "Follow for more"
+  Hook heading .............. ON  (big title in the first ~4 seconds)
+  Progress bar .............. ON
+  Sound effects ............. Energetic
+  Background music .......... OFF
+
+Settings page
+  Output size ............... 1080 x 1920 (HD vertical)
+  Frame rate ................ same as the source video (max 60)
+  Quality ................... high (CRF 18)
+  Download quality .......... up to 1440p
+  Encoder ................... Auto (uses your graphics card if possible)
+  Loudness .................. normalized to -14 LUFS (YouTube/TikTok standard)
+  Use NVIDIA GPU ............ OFF
+  Auto-watch channels ....... OFF
+  Auto-upload ............... OFF
+
+
+---------------------------------------------------------------
+  6. RECOMMENDED SETTINGS PER PLATFORM
+---------------------------------------------------------------
+
+For ALL platforms, change these from the defaults:
+  - Add the free Gemini key (see step 3). This is the biggest improvement.
+  - Caption style: pick ONE bold style instead of "Random mix", e.g.
+    "Bold Highlight", "Beast Mode" or "Highlight Box". Some random styles
+    (Clean Minimal, Typewriter) are too small to read on a phone.
+    You can also remove weak styles from the random mix on the Styles page.
+  - Watermark: your own handle, e.g.  @yourchannel
+  - If you have an NVIDIA card: Settings -> turn on "Use NVIDIA GPU" and
+    set Transcription quality to "Best (large-v3 turbo)". Captions become
+    more accurate and it runs faster.
+  - Long streams (2+ hours): set Shorts per video to 8-10.
+
+YOUTUBE SHORTS
+  Length ................ 20-59 seconds
+                          (Shorts can be up to 3 minutes, but a Short over
+                          1 minute that gets a copyright claim is blocked.
+                          Under 60 s is the safe choice.)
+  Caption position ...... Lower third (fine) or Center
+  Hook heading .......... ON
+  Progress bar .......... ON
+  Sound effects ......... Energetic (use Subtle for serious/podcast talk)
+  Music ................. OFF, or only "Monetization-safe" tracks from the
+                          Music page
+  Upload ................ copy the title + description + hashtags from the
+                          .txt file. Keep #shorts in the description.
+
+TIKTOK
+  Length ................ 20-45 seconds for the most views.
+                          If you are in TikTok's Creator Rewards program,
+                          make them over 60 seconds (e.g. 61-90 s), because
+                          it only pays for videos longer than 1 minute.
+                          (Check the current rule in the TikTok app.)
+  Caption position ...... Center  (TikTok's buttons and caption text cover
+                          the bottom and right side of the screen)
+  Hook heading .......... ON
+  Progress bar .......... OFF (TikTok already shows its own)
+  End card text ......... "Follow for part 2" works well on TikTok
+  Sound effects ......... Energetic
+  Music ................. OFF in the app. Add a trending sound inside the
+                          TikTok app at a low volume instead; this helps reach.
+  Upload ................ use the title as the TikTok caption, plus 3-5 hashtags
+
+INSTAGRAM REELS
+  Length ................ 15-45 seconds
+  Caption position ...... Center
+  Everything else ....... same as TikTok
+
+Never upload a video with another platform's logo on it (for example a
+TikTok download re-uploaded to Reels). This app does not add any platform
+logo, so its files are clean for every platform.
+
+
+---------------------------------------------------------------
+  7. IF SOMETHING GOES WRONG
+---------------------------------------------------------------
+
+- "Sign in to confirm you're not a bot": Settings -> YouTube account ->
+  "Sign in with Google Chrome", sign in, then click Finish.
+- "Download server busy" / "Couldn't download the speech model": the free
+  AI speech model (downloaded once, the first time) comes from Hugging Face,
+  which sometimes limits downloads. The app retries by itself for a few
+  minutes. If it still fails, wait 10 minutes and press Generate again.
+- "FFmpeg missing": run setup.bat again.
+- Very slow: choose Transcription quality "Fast (base)", or turn on the
+  NVIDIA GPU option if you have one.
+- Wrong language in captions: set "Spoken language" instead of Auto-detect.
+- The app won't open: run setup.bat again, then run.bat.
+- Log file (send this to whoever helps you):
+  %APPDATA%\RRShortsBuilder\rrshorts.log   (paste into File Explorer's address bar)
+
+
+---------------------------------------------------------------
+  IMPORTANT: COPYRIGHT
+---------------------------------------------------------------
+
+Only upload Shorts from videos you own or have permission to use.
+Re-uploading clips of other creators' videos or streams can get your
+channel copyright strikes or blocked from monetization.
