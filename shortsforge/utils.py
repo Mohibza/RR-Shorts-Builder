@@ -133,6 +133,9 @@ def probe(path: str) -> dict:
     return {"duration": dur, "width": w, "height": h, "fps": fps, "has_audio": "Audio:" in txt}
 
 
+_FFMPEG_NOISE = ("Loading font file", "Using font provider", "Added subtitle file", "fontselect:", "Glyph 0x")
+
+
 def run_ffmpeg(
     args: list[str],
     duration: float,
@@ -175,7 +178,12 @@ def run_ffmpeg(
     if cancel is not None and cancel.is_set():
         raise Cancelled()
     if proc.returncode != 0:
-        tail = "".join(err_lines[-25:])
+        # libass lists every font it loads; drop that noise so the real error stays in view
+        useful = [ln for ln in err_lines if not any(k in ln for k in _FFMPEG_NOISE)]
+        tail = "".join(useful[-25:])
+        from . import joblog
+        joblog.write(f"FFmpeg failed (code {proc.returncode})\nCOMMAND: {subprocess.list2cmdline(cmd)}\n"
+                     f"CWD: {cwd}\nSTDERR:\n{''.join(err_lines[-200:])}")
         raise RuntimeError(f"FFmpeg failed (code {proc.returncode}):\n{tail}")
     if on_progress:
         on_progress(1.0)

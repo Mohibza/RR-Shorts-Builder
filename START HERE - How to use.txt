@@ -189,8 +189,8 @@ logo, so its files are clean for every platform.
   NVIDIA GPU option if you have one.
 - Wrong language in captions: set "Spoken language" instead of Auto-detect.
 - The app won't open: run setup.bat again, then run.bat.
-- Log file (send this to whoever helps you):
-  %APPDATA%\RRShortsBuilder\rrshorts.log   (paste into File Explorer's address bar)
+- Log file (send this to whoever helps you, it has the full error details):
+  %APPDATA%\RRShortsBuilder\logs\jobs.log   (paste into File Explorer's address bar)
 
 
 ---------------------------------------------------------------

@@ -138,6 +138,6 @@ Run `build_installer.bat`. It creates `dist\RRShortsBuilder\RRShortsBuilder.exe`
 - **FFmpeg missing**: run `setup.bat` again, or download it from gyan.dev and point Settings to `ffmpeg.exe`
 - **Transcription is slow**: choose *Fast (base)* quality, or turn on the NVIDIA GPU option
 - **Wrong language detected**: pick the spoken language instead of Auto-detect
-- **Logs**: `%APPDATA%\RRShortsBuilder\rrshorts.log`. The Create page also has a *Show log* button
+- **Logs**: `%APPDATA%RRShortsBuilderogsjobs.log` has every job, error and failed FFmpeg command (startup crashes: `rrshorts.log`). The Create page also has a *Show log* button
 
 Only process videos you own or have the rights to reuse. Use royalty-free music, and check each track's licence (the Music page shows it). Even free tracks can occasionally get an automated Content ID claim; if one does, dispute it with the licence link.

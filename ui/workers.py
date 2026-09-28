@@ -9,7 +9,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from shortsforge import fonts, previews
+from shortsforge import fonts, joblog, previews
 from shortsforge.config import Settings
 from shortsforge.downloader import SourceItem, expand
 from shortsforge.pipeline import Pipeline, StyleChoice
@@ -87,6 +87,7 @@ class QueueWorker(QThread):
             except Exception as e:
                 msg = str(e).strip().split("\n")[0][:300]
                 self.log.emit(f"✖ {item.title}: {e}\n{traceback.format_exc(limit=3)}")
+                joblog.write(f"✖ JOB FAILED {item.title} ({item.source}): {e}\n{traceback.format_exc()}")
                 self.job_state.emit(job_id, "failed", msg)
 
 
@@ -105,6 +106,7 @@ class RestyleWorker(QThread):
             r = p.restyle(self.plan_file, self.choice, self.hook, self.progress.emit)
             self.done.emit(asdict(r))
         except Exception as e:
+            joblog.write(f"✖ RE-RENDER FAILED {self.plan_file}: {e}\n{traceback.format_exc()}")
             self.failed.emit(str(e).split("\n")[0][:400])
 
 

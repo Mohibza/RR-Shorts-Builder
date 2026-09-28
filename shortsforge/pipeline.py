@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import fonts
+from . import fonts, joblog
 from .captions import CAPTION_STYLES, CTA_STYLES, HOOK_STYLES, TextPlan, build_ass, chunk_words
 from .config import CACHE_DIR, Settings, usable_output_dir
 from .downloader import SourceItem, download
@@ -166,7 +166,7 @@ class Pipeline:
                  on_short: Callable[[ShortResult], None] = lambda r: None,
                  cancel: Optional[threading.Event] = None):
         self.s = settings
-        self.log = log
+        self.log = lambda m: (joblog.write(m), log(m))   # the UI panel + the persistent jobs.log
         self.progress = progress
         self.on_short = on_short
         self.cancel = cancel or threading.Event()
