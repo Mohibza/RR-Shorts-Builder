@@ -14,7 +14,7 @@ from typing import Callable, Optional
 from . import fonts, joblog
 from .captions import CAPTION_STYLES, CTA_STYLES, HOOK_STYLES, TextPlan, build_ass, chunk_words
 from .config import CACHE_DIR, Settings, usable_output_dir
-from .downloader import SourceItem, download
+from .downloader import DOWNLOADS, SourceItem, cached_file, download
 from .effects import COLOR_GRADES, INTROS, LAYOUTS, MOTIONS
 from . import sfx
 from .facetrack import camera_path, track_faces
@@ -26,7 +26,7 @@ from .highlights import INTENSE, Clip, words_in_range
 from .renderer import RenderJob, preview_frame, render, thumbnail
 from . import metadata, music_sources
 from .transcriber import ModelDownloadError, energy_curve, extract_audio, transcribe
-from .utils import Cancelled, probe, safe_name, set_ffmpeg_override
+from .utils import Cancelled, check_free_space, probe, safe_name, set_ffmpeg_override
 
 PLAN_SUFFIX = ".sf.json"
 WORK = CACHE_DIR / "work"
@@ -186,12 +186,20 @@ class Pipeline:
 
         # 1. download
         P("Downloading", 0.0, "")
+        if not item.is_local and item.duration and not cached_file(item):
+            # ~0.3 MB/s for 1080p60, ~0.6 MB/s at 1440p; video + audio are merged, so twice that while downloading
+            rate = 0.6e6 if int(s.source_quality or 1440) > 1080 else 0.3e6
+            check_free_space(DOWNLOADS, 2 * rate * item.duration + 0.5e9, "the video download")
         src = download(item, lambda f, d: P("Downloading", 0.25 * f, d), self.cancel, s.cookies_browser,
                        max_height=int(s.source_quality or 1440))
         self._check()
         info = probe(src)
         dur = info["duration"]
         self.log(f"Source: {info['width']}x{info['height']}, {dur / 60:.1f} min")
+        # speech audio (16 kHz mono WAV, 32 KB/s) + the Shorts (~2 MB/s at CRF 18 HD) + working files
+        check_free_space(CACHE_DIR, 32e3 * dur + 0.3e9, "the audio track")
+        check_free_space(usable_output_dir(s.output_dir)[0],
+                         s.shorts_per_video * s.max_duration * 2.2e6 + 0.3e9, "the Shorts")
 
         # 2. audio + transcript
         transcript = {"language": s.language if s.language != "auto" else "en", "segments": []}

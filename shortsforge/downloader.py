@@ -115,6 +115,12 @@ def expand(source: str, cookies_browser: str = "") -> list[SourceItem]:
     return items
 
 
+def cached_file(item: SourceItem) -> Optional[str]:
+    """The finished download of this item from an earlier run, if there is one."""
+    hits = [f for f in DOWNLOADS.glob(f"{item.vid}.*") if f.suffix.lower() in VIDEO_EXT and f.stem == item.vid]
+    return str(hits[0]) if hits else None
+
+
 def download(
     item: SourceItem,
     on_progress: Optional[Callable[[float, str], None]] = None,
@@ -125,11 +131,11 @@ def download(
     """Download (or pass through) a source. Returns local file path."""
     if item.is_local:
         return item.source
-    existing = [f for f in DOWNLOADS.glob(f"{item.vid}.*") if f.suffix.lower() in VIDEO_EXT and f.stem == item.vid]
+    existing = cached_file(item)
     if existing:
         if on_progress:
             on_progress(1.0, "Using cached download")
-        return str(existing[0])
+        return existing
 
     import yt_dlp
 

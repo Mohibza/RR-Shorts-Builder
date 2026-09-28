@@ -136,6 +136,26 @@ def probe(path: str) -> dict:
 _FFMPEG_NOISE = ("Loading font file", "Using font provider", "Added subtitle file", "fontselect:", "Glyph 0x")
 
 
+class NotEnoughSpace(RuntimeError):
+    pass
+
+
+def check_free_space(folder, need_bytes: float, what: str) -> None:
+    """Fail early with a clear message instead of a half-written file and a cryptic FFmpeg error."""
+    p = Path(folder)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        free = shutil.disk_usage(p).free
+    except OSError:
+        return
+    if free < need_bytes:
+        drive = p.anchor or str(p)
+        raise NotEnoughSpace(f"Not enough free disk space on {drive} for {what}: needs about "
+                             f"{need_bytes / 1e9:.1f} GB, only {free / 1e9:.1f} GB free. Free up space "
+                             f"(Settings → Clear download cache) or choose an output folder on another drive.")
+
+
 MAX_CMDLINE = 30000   # Windows refuses command lines over 32767 characters (WinError 206)
 
 
