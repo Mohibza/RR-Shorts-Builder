@@ -25,7 +25,7 @@ from .romanize import romanize_text, romanize_transcript
 from .highlights import INTENSE, Clip, words_in_range
 from .renderer import RenderJob, preview_frame, render, thumbnail
 from . import metadata, music_sources
-from .transcriber import energy_curve, extract_audio, transcribe
+from .transcriber import ModelDownloadError, energy_curve, extract_audio, transcribe
 from .utils import Cancelled, probe, safe_name, set_ffmpeg_override
 
 PLAN_SUFFIX = ".sf.json"
@@ -205,8 +205,8 @@ class Pipeline:
                     lambda f, d: P("Transcribing speech", 0.30 + 0.35 * f, d), self.cancel, self.log,
                     on_stage=lambda st, f, d: P(st, 0.29 + 0.01 * f, d),
                     caption_lang=getattr(s, "caption_lang", "auto"))
-            except Cancelled:
-                raise
+            except (Cancelled, ModelDownloadError):
+                raise  # no speech model = no captions and blind picks: stop with a clear message instead
             except Exception as e:
                 self.log(f"Transcription failed ({e}). Falling back to audio-energy highlights without captions.")
         import numpy as np

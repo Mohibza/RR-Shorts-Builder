@@ -79,6 +79,23 @@ MODEL_MB = {"tiny": 75, "base": 145, "small": 484, "medium": 1530, "large-v3": 3
 ALLOW = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
 
 
+RETRY_WAITS = [20, 60, 120, 180]   # seconds between model download attempts (covers HF's 5 min rate window)
+
+
+class ModelDownloadError(RuntimeError):
+    """The Whisper model couldn't be downloaded (the job must stop: Shorts without captions aren't usable)."""
+
+
+def _transient(e: Exception) -> bool:
+    """Worth retrying: rate limit (429), server error (5xx) or a network hiccup."""
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    if code is not None:
+        return code == 429 or code >= 500
+    msg = str(e).lower()
+    return any(k in msg for k in ("429", "too many requests", "timed out", "timeout", "connection",
+                                  "temporarily", "503", "502"))
+
+
 def _repo(size: str) -> str:
     from faster_whisper.utils import _MODELS
     return size if "/" in size else _MODELS[size]
@@ -112,38 +129,53 @@ def ensure_model(size: str, on_progress: Optional[Callable[[float, str], None]] 
     except Exception:
         pass
     blobs = MODELS_DIR / ("models--" + repo.replace("/", "--")) / "blobs"
-    result: dict = {}
 
-    def work():
-        try:
-            result["path"] = snapshot_download(repo, cache_dir=str(MODELS_DIR), allow_patterns=ALLOW)
-        except Exception as e:  # noqa: BLE001
-            result["error"] = e
-
-    th = threading.Thread(target=work, daemon=True)
-    th.start()
     def _size() -> int:
         try:
             return sum(f.stat().st_size for f in blobs.iterdir() if f.is_file()) if blobs.exists() else 0
         except OSError:
             return 0
 
-    t0, start_bytes = time.time(), _size()  # resumes a partial download: measure speed from here
-    last = start_bytes
-    while th.is_alive():
-        if cancel is not None and cancel.is_set():
-            raise Cancelled()  # the download keeps going in the background and resumes next time
-        th.join(0.5)
-        done = _size() or last
-        last = done
-        speed = (done - start_bytes) / max(time.time() - t0, 0.5)
-        if on_progress:
-            left = (total - done) / speed if speed > 0 else 0
-            eta = f" · ~{int(left // 60)} min {int(left % 60)} s left" if speed > 0 and done > 0 else ""
-            on_progress(min(0.99, done / total),
-                        f"{done / 1048576:.0f} / {total / 1048576:.0f} MB · {speed / 1048576:.1f} MB/s{eta}")
-    if "error" in result:
-        raise RuntimeError(f"Couldn't download the speech model: {result['error']}")
+    for attempt, wait in enumerate(RETRY_WAITS + [None]):
+        result: dict = {}
+
+        def work():
+            try:
+                result["path"] = snapshot_download(repo, cache_dir=str(MODELS_DIR), allow_patterns=ALLOW)
+            except Exception as e:  # noqa: BLE001
+                result["error"] = e
+
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+        t0, start_bytes = time.time(), _size()  # resumes a partial download: measure speed from here
+        last = start_bytes
+        while th.is_alive():
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()  # the download keeps going in the background and resumes next time
+            th.join(0.5)
+            done = _size() or last
+            last = done
+            speed = (done - start_bytes) / max(time.time() - t0, 0.5)
+            if on_progress:
+                left = (total - done) / speed if speed > 0 else 0
+                eta = f" · ~{int(left // 60)} min {int(left % 60)} s left" if speed > 0 and done > 0 else ""
+                on_progress(min(0.99, done / total),
+                            f"{done / 1048576:.0f} / {total / 1048576:.0f} MB · {speed / 1048576:.1f} MB/s{eta}")
+        if "error" not in result:
+            break
+        err = result["error"]
+        if wait is None or not _transient(err):
+            busy = " Hugging Face is limiting downloads right now; try again in a few minutes." if _transient(err) else ""
+            raise ModelDownloadError(f"Couldn't download the speech model.{busy} ({str(err)[:200]})")
+        # Hugging Face rate-limits anonymous downloads (HTTP 429) in ~5 minute windows: wait it out, then resume
+        end = time.time() + wait
+        while time.time() < end:
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
+            if on_progress:
+                on_progress(min(0.99, _size() / total), f"Download server busy · retry {attempt + 1}/{len(RETRY_WAITS)}"
+                                                        f" in {int(end - time.time())} s")
+            time.sleep(0.5)
     if on_progress:
         on_progress(1.0, "Model ready")
     return result["path"]
