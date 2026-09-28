@@ -65,8 +65,9 @@ Rules per Short:
   Max 300 characters. No hashtags here.
 - "tags": 12-15 search keywords/phrases (mix English + the viewer's language), most relevant first.
 - "hashtags": 4-6 hashtags, first one "#shorts".
+- "hooks": 3 different on-screen hook headings (max 7 words each, curiosity/tension, no hashtags).
 
-Return ONLY JSON: {{"shorts": [{{"id": 0, "title": "...", "description": "...", "tags": ["..."], "hashtags": ["#shorts", "..."]}}]}}
+Return ONLY JSON: {{"shorts": [{{"id": 0, "title": "...", "description": "...", "tags": ["..."], "hashtags": ["#shorts", "..."], "hooks": ["...", "...", "..."]}}]}}
 
 Shorts:
 {items}
@@ -98,6 +99,9 @@ def generate(ai, clips: list, video_title: str, lang: str, source: str = "", log
             if tags:
                 m["tags"] = list(dict.fromkeys(tags))[:15]
             hs = [_hashtag(h) for h in (r.get("hashtags") or []) if re.sub(r"[^\w]", "", str(h))]
+            hk = [str(h).strip().replace("#", "")[:70] for h in (r.get("hooks") or []) if str(h).strip()]
+            if hk:
+                m["hooks"] = hk[:3]
             if hs:
                 if "#shorts" not in hs:
                     hs.insert(0, "#shorts")

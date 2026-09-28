@@ -29,7 +29,7 @@ class MainWindow(QMainWindow):
             self.s.output_dir = str(base)
             self.s.save()
         set_ffmpeg_override(self.s.ffmpeg_path)
-        self.setWindowTitle("RR Shorts Builder — AI Shorts Generator")
+        self.setWindowTitle("Rebels Revolt Shorts — AI Shorts Generator")
         self.setWindowIcon(theme.app_icon())
         # opens maximized (see app.py); pages lay themselves out to fit the screen
         self.setMinimumSize(1024, 640)
@@ -58,8 +58,8 @@ class MainWindow(QMainWindow):
         brand.addWidget(logo)
         bt = QVBoxLayout()
         bt.setSpacing(0)
-        bt.addWidget(label("RR Shorts", "Logo"))
-        bt.addWidget(label(f"BUILDER · v{__version__}", "LogoSub"))
+        bt.addWidget(label("Rebels Revolt", "Logo"))
+        bt.addWidget(label(f"SHORTS · v{__version__}", "LogoSub"))
         brand.addLayout(bt)
         brand.addStretch(1)
         sv.addLayout(brand)
@@ -106,6 +106,7 @@ class MainWindow(QMainWindow):
         self.worker.log.connect(self.create.append_log)
         self.worker.progress.connect(self.create.on_progress)
         self.worker.job_state.connect(self._job_state)
+        self.worker.license_blocked.connect(self._license_blocked)
         self.worker.short_ready.connect(self.create.on_short)
         self.worker.start()
         self.running = 0
@@ -177,6 +178,16 @@ class MainWindow(QMainWindow):
             if not self._asking:
                 QTimer.singleShot(0, self._retry_after_login)
 
+    def _license_blocked(self, msg: str):
+        if self._asking:
+            return
+        self._asking = True
+        try:
+            from .license_dialog import show_license
+            show_license(self, msg)
+        finally:
+            self._asking = False
+
     def _retry_after_login(self):
         self._asking = True
         try:
@@ -241,7 +252,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         if self.running and QMessageBox.question(
-                self, "Quit RR Shorts Builder", "Shorts are still being generated. Quit anyway?") != QMessageBox.Yes:
+                self, "Quit Rebels Revolt Shorts", "Shorts are still being generated. Quit anyway?") != QMessageBox.Yes:
             e.ignore()
             return
         self.library.stop()

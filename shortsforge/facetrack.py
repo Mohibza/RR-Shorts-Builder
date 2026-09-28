@@ -25,7 +25,7 @@ def _detectors():
         return None
 
 
-def track_faces(video: str, start: float, end: float, sample_fps: float = 4.0,
+def track_faces(video: str, start: float, end: float, sample_fps: float = 3.0,
                 cancel: Optional[threading.Event] = None) -> dict:
     """Return {'times': [...], 'cx': [... or nan], 'size': [...], 'coverage': float, 'faces_max': int}.
     cx is the normalised (0..1) horizontal center of the tracked face."""
@@ -62,7 +62,7 @@ def track_faces(video: str, start: float, end: float, sample_fps: float = 4.0,
             if not ok:
                 break
             h, w = frame.shape[:2]
-            SW = 640
+            SW = 480
             scale = SW / w
             small = cv2.resize(frame, (SW, max(2, int(h * scale))), interpolation=cv2.INTER_AREA)
             gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)

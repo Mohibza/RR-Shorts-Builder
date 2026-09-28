@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableDelayedExpansion
-title RR Shorts Builder setup
+title Rebels Revolt Shorts setup
 cd /d "%~dp0"
 echo.
 echo  ===============================================
-echo    RR Shorts Builder - one-time setup
+echo    Rebels Revolt Shorts - one-time setup
 echo  ===============================================
 echo.
 
@@ -38,7 +38,10 @@ if not exist ".venv\Scripts\python.exe" (
 )
 echo [2/5] Installing Python packages (first time takes a few minutes)...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip >nul
-".venv\Scripts\python.exe" -m pip install -r requirements.txt || (echo Package install failed & pause & exit /b 1)
+findstr /v /i "pywebview" requirements.txt > "%TEMP%\rr_req.txt"
+".venv\Scripts\python.exe" -m pip install -r "%TEMP%\rr_req.txt" || (echo Package install failed & pause & exit /b 1)
+REM the app window (Microsoft Edge WebView2); optional - without it the app opens in an Edge app window
+".venv\Scripts\python.exe" -m pip install "pywebview>=5.3" || echo      (app window package skipped - the app will use an Edge window instead)
 
 REM ---------- 3. FFmpeg ----------
 where ffmpeg >nul 2>&1
@@ -69,7 +72,7 @@ if not errorlevel 1 (
     set /p GPU="[5/5] NVIDIA GPU detected. Install GPU acceleration for transcription (~1 GB)? (y/n): "
     if /i "!GPU!"=="y" (
         ".venv\Scripts\python.exe" -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
-        echo      Turn on "Use NVIDIA GPU" in RR Shorts Builder Settings.
+        echo      Turn on "Use NVIDIA GPU" in Rebels Revolt Shorts Settings.
     )
 ) else (
     echo [5/5] No NVIDIA GPU detected - transcription will run on CPU.
@@ -77,12 +80,13 @@ if not errorlevel 1 (
 
 REM ---------- Desktop shortcut ----------
 if exist "%USERPROFILE%\Desktop\ShortsForge.lnk" del "%USERPROFILE%\Desktop\ShortsForge.lnk" >nul 2>&1
+if exist "%USERPROFILE%\Desktop\RR Shorts Builder.lnk" del "%USERPROFILE%\Desktop\RR Shorts Builder.lnk" >nul 2>&1
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\RR Shorts Builder.lnk');" ^
+  "$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\Rebels Revolt Shorts.lnk');" ^
   "$s.TargetPath='%~dp0.venv\Scripts\pythonw.exe';$s.Arguments='\"%~dp0app.py\"';" ^
   "$s.WorkingDirectory='%~dp0';$s.IconLocation='%~dp0assets\icon.ico';$s.Save()" >nul 2>&1
 
 echo.
-echo  Setup complete! Start RR Shorts Builder from the desktop shortcut or run.bat
+echo  Setup complete! Start Rebels Revolt Shorts from the desktop shortcut or run.bat
 echo.
 pause

@@ -118,6 +118,7 @@ def probe(path: str) -> dict:
             return {
                 "duration": float(d.get("format", {}).get("duration", 0) or 0),
                 "width": w, "height": h, "fps": fps or 30.0, "has_audio": a,
+                "vcodec": v.get("codec_name", ""),
             }
     # Fallback: parse `ffmpeg -i`
     r = run([find_ffmpeg(), "-hide_banner", "-i", path])
@@ -206,7 +207,14 @@ def ffmpeg_cwd() -> str:
 
 @lru_cache(maxsize=4)
 def pick_encoder(preference: str = "auto") -> str:
-    """Pick a working H.264 encoder, preferring GPU when available."""
+    """Pick a working H.264 encoder, preferring GPU when available (tested once, then remembered)."""
+    if preference in _ENC_CACHE:
+        return _ENC_CACHE[preference]
+    _ENC_CACHE[preference] = _pick_encoder(preference)
+    return _ENC_CACHE[preference]
+
+
+def _pick_encoder(preference: str = "auto") -> str:
     order = ["h264_nvenc", "h264_qsv", "h264_amf", "libx264"] if preference == "auto" else [preference, "libx264"]
     ff = find_ffmpeg()
     for enc in order:
@@ -220,18 +228,25 @@ def pick_encoder(preference: str = "auto") -> str:
     return "libx264"
 
 
-def encoder_args(enc: str, crf: int) -> list[str]:
-    """High-quality H.264 settings tuned for Shorts (YouTube re-encodes, so give it a clean master)."""
+def encoder_args(enc: str, crf: int, speed: str = "fast") -> list[str]:
+    """H.264 settings tuned for Shorts. "fast" keeps the look (YouTube re-encodes anyway) at 2-3x the speed."""
+    fast = speed != "quality"
     common = ["-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60"]
     if enc == "h264_nvenc":
-        return ["-c:v", enc, "-preset", "p7", "-tune", "hq", "-rc", "vbr", "-cq", str(crf), "-b:v", "0",
-                "-maxrate", "24M", "-bufsize", "48M", "-spatial-aq", "1", "-temporal-aq", "1", "-bf", "3"] + common
+        return ["-c:v", enc, "-preset", "p4" if fast else "p7", "-tune", "hq", "-rc", "vbr", "-cq", str(crf),
+                "-b:v", "0", "-maxrate", "24M", "-bufsize", "48M", "-spatial-aq", "1", "-temporal-aq", "1",
+                "-bf", "3"] + common
     if enc == "h264_qsv":
-        return ["-c:v", enc, "-global_quality", str(crf), "-preset", "veryslow", "-look_ahead", "1"] + common
+        return ["-c:v", enc, "-global_quality", str(crf), "-preset", "faster" if fast else "veryslow",
+                "-look_ahead", "0" if fast else "1"] + common
     if enc == "h264_amf":
-        return ["-c:v", enc, "-quality", "quality", "-rc", "cqp", "-qp_i", str(crf), "-qp_p", str(crf + 2)] + common
-    return ["-c:v", "libx264", "-preset", "medium", "-crf", str(crf), "-tune", "film",
-            "-x264-params", "aq-mode=3:aq-strength=0.9:deblock=-1,-1"] + common
+        return ["-c:v", enc, "-quality", "balanced" if fast else "quality", "-rc", "cqp", "-qp_i", str(crf),
+                "-qp_p", str(crf + 2)] + common
+    return ["-c:v", "libx264", "-preset", "veryfast" if fast else "medium", "-crf", str(crf - 1 if fast else crf),
+            "-tune", "film", "-x264-params", "aq-mode=3:aq-strength=0.9:deblock=-1,-1"] + common
+
+
+_ENC_CACHE: dict = {}
 
 
 def safe_name(s: str, maxlen: int = 60) -> str:

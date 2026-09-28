@@ -1,6 +1,6 @@
-"""RR Shorts Builder - turn long YouTube videos into styled Shorts automatically."""
+"""Rebels Revolt Shorts - turn long YouTube videos into styled Shorts automatically."""
 
-__version__ = "1.6.0"
-APP_NAME = "RR Shorts Builder"
+__version__ = "2.1.1"
+APP_NAME = "Rebels Revolt Shorts"
 DATA_NAME = "RRShortsBuilder"     # folder name under %APPDATA% (no spaces)
 LEGACY_DATA_NAMES = ("ShortsForge",)

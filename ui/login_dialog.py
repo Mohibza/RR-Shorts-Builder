@@ -38,7 +38,7 @@ class LoginDialog(QDialog):
         v.setSpacing(14)
         v.addWidget(label("Sign in to YouTube", "H2"))
         v.addWidget(label("YouTube only lets signed-in users download when it suspects a bot. Sign in once in your "
-                          "real browser, and RR Shorts Builder keeps the login renewed in the background after that.",
+                          "real browser, and Rebels Revolt Shorts keeps the login renewed in the background after that.",
                           "Muted", wrap=True))
 
         steps = QFrame()
@@ -47,7 +47,7 @@ class LoginDialog(QDialog):
         sv.setContentsMargins(18, 16, 18, 16)
         sv.setSpacing(8)
         bname = self.browser[0] if self.browser else "Chrome / Edge"
-        for i, t in enumerate((f"Click the button below. A {bname} window opens with a separate RR Shorts Builder profile.",
+        for i, t in enumerate((f"Click the button below. A {bname} window opens with a separate Rebels Revolt Shorts profile.",
                                "Sign in with the Google account that owns your channel.",
                                "When your YouTube home page shows, click Finish (or just close that window).")):
             r = QHBoxLayout()
@@ -142,7 +142,7 @@ class LoginDialog(QDialog):
 
     def _harvested(self, n: int, err: str):
         if n > 0 and cookies.has_login():
-            self._set("✓ Signed in — RR Shorts Builder will keep this login fresh automatically.", theme.GOOD)
+            self._set("✓ Signed in — Rebels Revolt Shorts will keep this login fresh automatically.", theme.GOOD)
             QTimer.singleShot(700, self.accept)
             return
         self.open_btn.setEnabled(True)

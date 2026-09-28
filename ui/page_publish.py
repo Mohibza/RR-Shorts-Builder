@@ -52,6 +52,19 @@ GUIDES = {
             "Facebook has no upload API for personal profiles.",
         ],
     },
+    "instagram": {
+        "title": "Instagram API (Meta for Developers, free): optional, Sign in works without it",
+        "fields": [("fb_app_id", "App ID"), ("fb_app_secret", "App secret")],
+        "steps": [
+            "Use the same Meta app as Facebook (or create one at <a href='https://developers.facebook.com/apps/"
+            "creation/'>Meta for Developers</a>) and add <b>http://localhost:53682/</b> as a Valid OAuth Redirect URI.",
+            "In the Instagram app switch your account to <b>Professional</b> (Creator or Business) and link it to "
+            "your Facebook Page.",
+            "Permissions used: instagram_basic, instagram_content_publish, pages_show_list, pages_read_engagement. "
+            "They work for your own accounts while the app is in Development mode.",
+            "Save, then choose <b>Connect with the API</b> and tick your Page.",
+        ],
+    },
     "tiktok": {
         "title": "Connect TikTok (TikTok for Developers, free)",
         "fields": [("tt_client_key", "Client key"), ("tt_client_secret", "Client secret")],
@@ -67,7 +80,7 @@ GUIDES = {
         ],
     },
 }
-ICON = {"youtube": "play", "facebook": "film", "tiktok": "music"}
+ICON = {"youtube": "play", "facebook": "film", "instagram": "camera", "tiktok": "music"}
 
 
 class KeysDialog(QDialog):
@@ -149,8 +162,8 @@ class AccountCard(Card):
         h.addWidget(ic)
         h.addWidget(label(publish.PLATFORMS[platform], "H2"))
         h.addStretch(1)
-        self.use = Toggle("Auto-upload", platform in (page.s.upload_platforms or []))
-        self.use.setToolTip("Include this platform when new Shorts are uploaded automatically")
+        self.use = Toggle("Auto", platform in (page.s.upload_platforms or []))
+        self.use.setToolTip("Auto-upload: include this platform when new Shorts are posted automatically")
         self.use.toggled.connect(page._save)
         h.addWidget(self.use)
         self.lay.addLayout(h)
@@ -160,18 +173,19 @@ class AccountCard(Card):
         self.box.setSpacing(4)
         self.lay.addLayout(self.box)
         self.lay.addStretch(1)
-        br = QHBoxLayout()
-        self.keys = QPushButton(" Setup keys")
-        self.keys.setIcon(theme.icon("key"))
-        self.keys.clicked.connect(lambda: page.setup_keys(platform))
-        self.conn = QPushButton("  Connect")
-        self.conn.setObjectName("Primary")
-        self.conn.setIcon(theme.icon("link", "#FFFFFF"))
-        self.conn.clicked.connect(lambda: page.connect(platform))
-        br.addWidget(self.keys)
-        br.addStretch(1)
-        br.addWidget(self.conn)
-        self.lay.addLayout(br)
+        self.signin = QPushButton("  Add account")
+        self.signin.setObjectName("Primary")
+        self.signin.setIcon(theme.icon("plus", "#FFFFFF"))
+        self.signin.setToolTip("Sign in once in a private browser window. No developer keys needed.\n"
+                               "Add as many accounts as you like; each gets its own private browser.")
+        self.signin.clicked.connect(lambda: page.browser_sign_in(platform))
+        self.lay.addWidget(self.signin)
+        self.adv = QPushButton("API keys (advanced)")
+        self.adv.setObjectName("Link")
+        self.adv.setCursor(Qt.PointingHandCursor)
+        self.adv.setToolTip("Optional: upload through the official developer API instead")
+        self.adv.clicked.connect(lambda: page.api_menu(platform))
+        self.lay.addWidget(self.adv, 0, Qt.AlignLeft)
 
     def refresh(self):
         while self.box.count():
@@ -179,31 +193,186 @@ class AccountCard(Card):
             if w:
                 w.deleteLater()
         accs = publish.load_accounts().get(self.platform, [])
-        if not publish.credentials_ok(self.platform, self.page.s):
-            self.status.setText("Step 1: click Setup keys (one-time, free developer app).")
-        elif not accs:
-            self.status.setText("Keys saved. Step 2: click Connect and sign in.")
-        else:
-            self.status.setText({"youtube": "Uploads as your channel.",
-                                 "facebook": "Posts Reels to the ticked Pages.",
-                                 "tiktok": "Posts to this TikTok account."}[self.platform])
+        self.status.setText("Click Add account and sign in once. Posting is fully automatic after that."
+                            if not accs else f"{len(accs)} account{'s' if len(accs) != 1 else ''} · posts automatically")
         for a in accs:
             row = QWidget()
             rh = QHBoxLayout(row)
             rh.setContentsMargins(0, 0, 0, 0)
+            rh.setSpacing(4)
             cb = QCheckBox(a.get("name", a["id"]))
             cb.setChecked(a.get("enabled", True))
+            cb.setToolTip(("Signed in with the app's browser" if a.get("mode") == "browser" else "Connected with the API")
+                          + "\nUntick to pause uploads to this account")
             cb.toggled.connect(lambda on, i=a["id"]: publish.set_enabled(self.platform, i, on))
+            rh.addWidget(cb, 1)
+            if a.get("mode") == "browser":
+                for ic, tip, fn in (("globe", "Open this account's browser (e.g. to finish a security check)",
+                                     lambda _=False, acc=a: self.page.open_browser(self.platform, acc)),
+                                    ("refresh", "Sign in again",
+                                     lambda _=False, acc=a: self.page.browser_sign_in(self.platform, acc))):
+                    b = QPushButton()
+                    b.setIcon(theme.icon(ic))
+                    b.setFixedSize(30, 28)
+                    b.setToolTip(tip)
+                    b.clicked.connect(fn)
+                    rh.addWidget(b)
             rm = QPushButton()
             rm.setIcon(theme.icon("trash", theme.BAD))
             rm.setFixedSize(30, 28)
             rm.setObjectName("Danger")
-            rm.setToolTip("Disconnect this account")
+            rm.setToolTip("Remove this account")
             rm.clicked.connect(lambda _=False, i=a["id"], n=a.get("name", ""): self.page.disconnect(self.platform, i, n))
-            rh.addWidget(cb, 1)
             rh.addWidget(rm)
             self.box.addWidget(row)
-        self.conn.setText("  Add account" if accs else "  Connect")
+
+
+class CheckWorker(QThread):
+    done = Signal(bool, str)
+
+    def __init__(self, platform: str, profile=None):
+        super().__init__()
+        self.platform, self.profile = platform, profile
+
+    def run(self):
+        from shortsforge import webupload
+        try:
+            self.done.emit(webupload.check_login(self.platform, self.profile), "")
+        except Exception as e:
+            self.done.emit(False, str(e))
+
+
+class BrowserSignIn(QDialog):
+    """Sign in once in the app's own Chrome window (like the YouTube download sign-in)."""
+    HINT = {
+        "youtube": "Sign in with the Google account that owns your channel. If YouTube asks which channel, pick it.",
+        "tiktok": "Log in to TikTok the way you normally do (phone, email, Google…).",
+        "facebook": "Log in to Facebook. To post Reels as your Page, switch to the Page's profile in that window "
+                    "(profile picture → your Page) before clicking Finish.",
+        "instagram": "Log in to Instagram (any account type). If it asks to save login info, click Save.",
+    }
+
+    def __init__(self, platform: str, parent=None, acc=None):
+        super().__init__(parent)
+        from shortsforge import webupload
+        self.platform, self.wu = platform, webupload
+        self.proc = None
+        self.worker = None
+        name = webupload.NICE[platform]
+        accs = publish.load_accounts().get(platform, [])
+        if acc:                                  # sign in again to an existing account
+            self.key, self.new = acc.get("profile", ""), False
+            default_label = acc.get("name", "")
+        elif platform == "youtube" and not any(a.get("id") == "browser" for a in accs):
+            self.key, self.new = "", True        # first YouTube account shares the download login
+            default_label = "YouTube (main)"
+        else:
+            self.key, self.new = webupload.new_profile_key(platform), True
+            default_label = f"{name} {sum(1 for a in accs if a.get('mode') == 'browser') + 1}"
+        self.profile = webupload.PROFILES / self.key if self.key else None
+        self.setWindowTitle(f"Sign in to {name}")
+        self.setMinimumWidth(560)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(26, 24, 26, 22)
+        v.setSpacing(14)
+        v.addWidget(label(f"Sign in to {name}", "H2"))
+        v.addWidget(label("A normal Chrome window opens with the app's private profile (your usual Chrome isn't "
+                          "touched). Sign in once; the app remembers it and uploads there by itself.", "Muted",
+                          wrap=True))
+        v.addWidget(label(self.HINT[platform], "", wrap=True))
+        from PySide6.QtWidgets import QLineEdit
+        self.label_edit = QLineEdit(default_label)
+        self.label_edit.setPlaceholderText("e.g. Main channel, Urdu page, @myhandle")
+        v.addWidget(field("Account name (shown in the app)", self.label_edit))
+        self.status = label("Checking whether you're already signed in…", "Small", wrap=True)
+        v.addWidget(self.status)
+        br = QHBoxLayout()
+        br.addStretch(1)
+        self.cancel = QPushButton("Cancel")
+        self.cancel.clicked.connect(self.reject)
+        self.open_btn = QPushButton("  Open sign-in window")
+        self.open_btn.setIcon(theme.icon("globe"))
+        self.open_btn.clicked.connect(self.open_window)
+        self.finish = QPushButton("  Finish")
+        self.finish.setObjectName("Primary")
+        self.finish.clicked.connect(self.finish_clicked)
+        for b in (self.cancel, self.open_btn, self.finish):
+            br.addWidget(b)
+        v.addLayout(br)
+        self.timer = QTimer(self)
+        self.timer.setInterval(800)
+        self.timer.timeout.connect(self._poll)
+        self._check()
+
+    def _set(self, text: str, color: str = theme.MUTED):
+        self.status.setText(text)
+        self.status.setStyleSheet(f"color:{color}; font-weight:600;")
+
+    def _check(self):
+        self.finish.setEnabled(False)
+        self.open_btn.setEnabled(False)
+        self.worker = CheckWorker(self.platform, self.profile)
+        self.worker.done.connect(self._checked)
+        self.worker.start()
+
+    def _checked(self, ok: bool, err: str):
+        self.open_btn.setEnabled(True)
+        self.finish.setEnabled(True)
+        if ok:
+            self.wu.register(self.platform, self.key, self.label_edit.text())
+            self._set(f"✓ Signed in to {self.wu.NICE[self.platform]}. Uploads will use this login.", theme.GOOD)
+            self.finish.setText("  Done")
+            self._ok = True
+        elif err:
+            self._set(err, theme.BAD)
+        else:
+            self._set("Not signed in yet. Click “Open sign-in window”, log in, then click Finish.", theme.WARN)
+
+    def open_window(self):
+        try:
+            self.proc = self.wu.open_sign_in(self.platform, self.profile)
+        except Exception as e:
+            self._set(str(e), theme.BAD)
+            return
+        self.open_btn.setEnabled(False)
+        self._set("Log in in the browser window, then click Finish (or just close that window).", theme.WARN)
+        self.timer.start()
+
+    def _poll(self):
+        if self.proc and self.proc.poll() is not None:
+            self.timer.stop()
+            self.proc = None
+            self._set("Checking your login…")
+            self._check()
+
+    def finish_clicked(self):
+        if getattr(self, "_ok", False):
+            self.accept()
+            return
+        if self.proc and self.proc.poll() is None:
+            self._set("Closing the browser and saving your login…")
+            import os
+            import subprocess
+            try:
+                if os.name == "nt":   # polite close so the browser writes the login to disk
+                    subprocess.run(["taskkill", "/PID", str(self.proc.pid), "/T"], capture_output=True,
+                                   creationflags=0x08000000)
+                else:
+                    self.proc.terminate()
+            except Exception:
+                pass
+            QTimer.singleShot(9000, lambda: self.proc and self.proc.poll() is None and self.proc.kill())
+        else:
+            self._set("Checking your login…")
+            self._check()
+
+    def reject(self):
+        self.timer.stop()
+        if self.worker and self.worker.isRunning():
+            self.worker.wait(30000)
+        if self.new and self.key and not getattr(self, "_ok", False):
+            self.wu.remove_profile({"profile": self.key})     # cancelled: don't leave an empty browser behind
+        super().reject()
 
 
 class PublishPage(QWidget):
@@ -220,8 +389,8 @@ class PublishPage(QWidget):
         tv = QVBoxLayout()
         tv.setSpacing(2)
         tv.addWidget(label("Publish", "H1"))
-        tv.addWidget(label("Connect your accounts once. New Shorts are uploaded automatically with their viral title, "
-                           "description and tags, spaced out at random times.", "Muted", wrap=True))
+        tv.addWidget(label("Sign in to your accounts once. New Shorts are uploaded automatically with their viral "
+                           "title, description and tags, spaced out at random times.", "Muted", wrap=True))
         hr.addLayout(tv, 1)
         self.t_auto = Toggle("Auto-upload new Shorts", getattr(settings, "auto_upload", False))
         self.t_auto.toggled.connect(self._save)
@@ -275,12 +444,17 @@ class PublishPage(QWidget):
         for k, v in (("public", "Public"), ("unlisted", "Unlisted"), ("private", "Private")):
             self.priv.addItem(v, k)
         self.priv.setCurrentIndex(max(0, self.priv.findData(s.yt_privacy)))
-        self.tt_ok = QCheckBox("TikTok approved my app (post publicly)")
+        self.show_b = QCheckBox("Show the browser while uploading")
+        self.show_b.setToolTip("Off: direct sign-in uploads run in a minimized window")
+        self.show_b.setChecked(bool(getattr(s, "web_upload_visible", False)))
+        self.show_b.toggled.connect(self._save)
+        self.tt_ok = QCheckBox("TikTok approved my API app (post publicly)")
         self.tt_ok.setChecked(bool(s.tiktok_audited))
         g.addWidget(field("Random gap between uploads", gap), 0, 0)
         g.addWidget(field("Max per account per day", self.cap), 0, 1)
         g.addWidget(field("No uploads between (quiet hours)", quiet), 0, 2)
         g.addWidget(field("YouTube visibility", self.priv), 0, 3)
+        g.addWidget(self.show_b, 1, 0, 1, 2)
         g.addWidget(self.tt_ok, 1, 3)
         for i in range(4):
             g.setColumnStretch(i, 1)
@@ -401,6 +575,26 @@ class PublishPage(QWidget):
             QDesktopServices.openUrl(QUrl(j["url"]))
 
     # ------------------------------------------------------------------
+    def browser_sign_in(self, platform: str, acc=None):
+        BrowserSignIn(platform, self, acc).exec()
+        self.cards[platform].refresh()
+        if publish.load_accounts().get(platform) and platform not in (self.s.upload_platforms or []):
+            self.cards[platform].use.setChecked(True)
+
+    def open_browser(self, platform: str, acc=None):
+        from shortsforge import webupload
+        try:
+            webupload.open_page(platform, webupload.profile_dir(acc))
+        except Exception as e:
+            QMessageBox.warning(self, "Browser", str(e))
+
+    def api_menu(self, platform: str):
+        from PySide6.QtWidgets import QMenu
+        m = QMenu(self)
+        m.addAction("Setup developer keys…", lambda: self.setup_keys(platform))
+        m.addAction("Connect with the API", lambda: self.connect(platform))
+        m.exec(self.cards[platform].adv.mapToGlobal(self.cards[platform].adv.rect().bottomLeft()))
+
     def setup_keys(self, platform: str):
         if KeysDialog(self.s, platform, self).exec():
             self.cards[platform].refresh()
@@ -414,8 +608,8 @@ class PublishPage(QWidget):
             publish.CANCEL.set()
             return
         c = self.cards[platform]
-        c.conn.setText("  Cancel sign-in")
-        c.status.setText("Your browser opened the sign-in page. Sign in and allow access, then come back here.")
+        c.status.setText("Your browser opened the sign-in page. Sign in and allow access, then come back here. "
+                         "(Click API keys → Connect again to cancel.)")
         self._conn = ConnectWorker(platform, self.s.copy())
         self._conn.done.connect(self._connected)
         self._conn.start()
@@ -444,6 +638,7 @@ class PublishPage(QWidget):
         s.upload_quiet_start, s.upload_quiet_end = self.qs.value(), self.qe.value()
         s.yt_privacy = self.priv.currentData()
         s.tiktok_audited = self.tt_ok.isChecked()
+        s.web_upload_visible = self.show_b.isChecked()
         s.save()
         self.refresh_queue()
 

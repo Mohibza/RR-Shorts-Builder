@@ -32,7 +32,7 @@ def write_cookies(cookies: list[dict]) -> int:
     """cookies: [{domain, name, value, path, secure, httponly, expires(int|0)}]. Returns count written."""
     keep = [c for c in cookies if any(d in c["domain"] for d in ("youtube.com", "google.com", "googlevideo.com"))]
     soon = int(time.time()) + 30 * 86400
-    lines = ["# Netscape HTTP Cookie File", "# Saved by RR Shorts Builder in-app YouTube sign-in", ""]
+    lines = ["# Netscape HTTP Cookie File", "# Saved by Rebels Revolt Shorts in-app YouTube sign-in", ""]
     for c in keep:
         domain = c["domain"]
         flag = "TRUE" if domain.startswith(".") else "FALSE"

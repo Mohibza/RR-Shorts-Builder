@@ -1,7 +1,7 @@
 """YouTube sign-in through the user's real Chrome/Edge, then silent cookie refresh.
 
 Flow
-1. `open_sign_in()` starts genuine Chrome/Edge with a private RR Shorts Builder profile (no automation flags),
+1. `open_sign_in()` starts genuine Chrome/Edge with a private Rebels Revolt Shorts profile (no automation flags),
    so Google treats it like any normal browser. The user signs in once.
 2. `harvest()` relaunches that same profile *headless* with DevTools on a private port and reads the
    cookies with Storage.getCookies, then writes cookies.txt for yt-dlp.
@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,7 @@ from .config import data_dir
 from .utils import NO_WINDOW
 
 PROFILE = data_dir() / "browser-profile"
+BROWSER_LOCK = threading.RLock()   # one hidden run of the profile at a time (cookie refresh / web uploads)
 SIGNIN_URL = ("https://accounts.google.com/ServiceLogin?service=youtube&passive=true"
               "&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26next%3D%252F")
 
@@ -56,8 +58,8 @@ def find_browser() -> Optional[tuple[str, str]]:
     return None
 
 
-def _base_flags() -> list[str]:
-    return [f"--user-data-dir={PROFILE}", "--no-first-run", "--no-default-browser-check",
+def _base_flags(profile: Optional[Path] = None) -> list[str]:
+    return [f"--user-data-dir={profile or PROFILE}", "--no-first-run", "--no-default-browser-check",
             "--disable-features=ChromeWhatsNewUI"]
 
 
@@ -70,8 +72,8 @@ def open_sign_in() -> subprocess.Popen:
     return subprocess.Popen([b[1], *_base_flags(), "--new-window", SIGNIN_URL])
 
 
-def _wait_port(timeout: float) -> tuple[int, str]:
-    f = PROFILE / "DevToolsActivePort"
+def _wait_port(timeout: float, profile: Optional[Path] = None) -> tuple[int, str]:
+    f = (profile or PROFILE) / "DevToolsActivePort"
     end = time.time() + timeout
     while time.time() < end:
         try:
@@ -98,6 +100,11 @@ def _cdp(ws, method: str, params: Optional[dict] = None, msg_id: int = 1) -> dic
 
 def harvest(visit_youtube: bool = True, timeout: float = 40) -> int:
     """Start the profile headless, read its cookies, save cookies.txt. Returns number of cookies saved."""
+    with BROWSER_LOCK:
+        return _harvest(visit_youtube, timeout)
+
+
+def _harvest(visit_youtube: bool = True, timeout: float = 40) -> int:
     from websockets.sync.client import connect
 
     b = find_browser()
@@ -172,7 +179,7 @@ AUDIO_LIBRARY_URL = "https://studio.youtube.com/channel/UC/music"  # "UC" = your
 
 
 def _set_download_folder(folder: str) -> None:
-    """Make the RR Shorts Builder browser profile save downloads straight into `folder` without asking."""
+    """Make the Rebels Revolt Shorts browser profile save downloads straight into `folder` without asking."""
     prefs_path = PROFILE / "Default" / "Preferences"
     prefs_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -187,7 +194,7 @@ def _set_download_folder(folder: str) -> None:
 
 
 def open_in_browser(url: str, music_folder: str) -> subprocess.Popen:
-    """Open `url` in the RR Shorts Builder browser profile, with downloads saved straight into `music_folder`."""
+    """Open `url` in the Rebels Revolt Shorts browser profile, with downloads saved straight into `music_folder`."""
     b = find_browser()
     if not b:
         raise RuntimeError("Chrome or Edge was not found on this PC.")

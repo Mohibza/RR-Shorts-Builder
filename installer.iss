@@ -1,8 +1,8 @@
-; Inno Setup script: turns dist\RRShortsBuilder into one RR-Shorts-Builder-Setup.exe
+; Inno Setup script: turns dist\RRShortsBuilder into one Rebels-Revolt-Shorts-Setup.exe
 ; Built automatically by build_installer.bat
 
-#define AppName "RR Shorts Builder"
-#define AppVersion "1.6.0"
+#define AppName "Rebels Revolt Shorts"
+#define AppVersion "2.1.1"
 #define AppPublisher "EagleEye Codes"
 
 [Setup]
@@ -17,7 +17,7 @@ DefaultDirName={localappdata}\Programs\RRShortsBuilder
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=installer_output
-OutputBaseFilename=RR-Shorts-Builder-Setup-{#AppVersion}
+OutputBaseFilename=Rebels-Revolt-Shorts-Setup-{#AppVersion}
 SetupIconFile=assets\icon.ico
 UninstallDisplayIcon={app}\RRShortsBuilder.exe
 Compression=lzma2/max

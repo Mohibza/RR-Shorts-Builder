@@ -40,7 +40,18 @@ LAYOUTS: dict[str, str] = {
     "blur_fit": "Full Frame + Blurred Background",
     "center_crop": "Center Crop",
     "split": "Split: Speaker + Full Frame",
+    "split_reverse": "Split: Full Frame + Speaker",
+    "two_speakers": "Two Speakers (podcast, stacked)",
+    "zoom45": "4:5 Zoom + Blurred Background",
+    "square": "Square + Blurred Background",
+    "framed": "Framed Card",
+    "black_fit": "Full Frame + Black Bars",
 }
+
+# layouts that follow the speaker's face (need face tracking)
+CAMERA_LAYOUTS = ("auto", "smart_crop", "split", "split_reverse", "zoom45", "square")
+# layouts that crop a landscape frame (a vertical source just gets the blurred fit)
+CROP_LAYOUTS = ("smart_crop", "center_crop", "split", "split_reverse", "two_speakers", "zoom45", "square")
 
 
 def motion_filters(motion: str, dur: float, punch_times: list[float], intro: str, fps: int = 30) -> str | None:

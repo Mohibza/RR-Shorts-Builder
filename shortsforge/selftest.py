@@ -1,4 +1,4 @@
-"""`RR Shorts Builder.exe --selftest`: verifies a packaged build can do real work, writes a report file.
+"""`Rebels Revolt Shorts.exe --selftest`: verifies a packaged build can do real work, writes a report file.
 
 Checks every heavy dependency, FFmpeg, the face detector, fonts, the speech-model runtime and renders a
 short test clip end-to-end with captions, sound effects and a camera move.
@@ -92,7 +92,35 @@ def run() -> int:
         return f"{size // 1024} KB test Short"
     check("render a test Short", render)
 
-    lines.insert(0, f"RR Shorts Builder self-test · {'ALL PASSED' if ok else 'PROBLEMS FOUND'} · python {sys.version.split()[0]}"
+    def web_ui():
+        import json as _j
+        import urllib.request
+        from .config import app_root
+        from .server import App
+        idx = app_root() / "web" / "dist" / "index.html"
+        if not idx.exists():
+            raise RuntimeError(f"interface files missing: {idx}")
+        a = App()
+        a.serve_background()
+        try:
+            req = urllib.request.Request(f"http://127.0.0.1:{a.port}/api/state", headers={"X-RR-Token": a.token})
+            d = _j.loads(urllib.request.urlopen(req, timeout=20).read())
+            if not d.get("ok"):
+                raise RuntimeError("engine did not answer")
+            html = urllib.request.urlopen(f"http://127.0.0.1:{a.port}/", timeout=10).read()
+            if b"<div id=\"root\">" not in html:
+                raise RuntimeError("interface page is broken")
+        finally:
+            a.shutdown()
+        try:
+            import webview  # noqa: F401
+            shell = "pywebview"
+        except Exception:
+            shell = "browser app window (pywebview not installed)"
+        return f"engine + interface ok · window: {shell}"
+    check("new interface", web_ui)
+
+    lines.insert(0, f"Rebels Revolt Shorts self-test · {'ALL PASSED' if ok else 'PROBLEMS FOUND'} · python {sys.version.split()[0]}"
                     f" · frozen={getattr(sys, 'frozen', False)}")
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:

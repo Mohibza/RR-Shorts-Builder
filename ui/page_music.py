@@ -356,7 +356,7 @@ class MusicPage(QWidget):
 
         c = Card(pad=16)
         c.lay.addWidget(label("MORE FREE SOURCES", "Section"))
-        c.lay.addWidget(label("These sites have no public music search API, so they open in your RR Shorts Builder "
+        c.lay.addWidget(label("These sites have no public music search API, so they open in your Rebels Revolt Shorts "
                               "browser. Click Download on any track there and it lands in My library "
                               "automatically.", "Small", wrap=True))
         g = QGridLayout()
@@ -374,11 +374,10 @@ class MusicPage(QWidget):
 
     # ================================================================== library logic
     def folder(self) -> Path:
-        p = Path(self.s.music_dir)
-        try:
-            p.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
+        from shortsforge.config import usable_music_dir
+        p, moved = usable_music_dir(self.s.music_dir)
+        if moved:
+            self.s.music_dir = str(p)
         return p
 
     def _watch(self):
@@ -678,7 +677,7 @@ class MusicPage(QWidget):
                  "pixabay": "• Pixabay may ask you to log in (free) before downloading\n"}.get(key, "")
         QMessageBox.information(
             self, name,
-            f"{name} is opening in your RR Shorts Builder browser.\n\n{extra}"
+            f"{name} is opening in your Rebels Revolt Shorts browser.\n\n{extra}"
             "• Search and preview tracks there\n"
             "• Click Download on the ones you like: they appear in My library automatically\n\n"
             f"Licence: {note}.")

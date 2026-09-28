@@ -2,8 +2,9 @@
 .venv/
 __pycache__/
 *.pyc
-build/
-dist/
+/build/
+/dist/
+web/node_modules/
 installer_output/
 *.spec.bak
 # bundled tools are downloaded by setup/build scripts
@@ -12,3 +13,6 @@ bin/*.exe
 *.mp4
 *.mov
 *.log
+# license server local test artifacts (the deployed server keeps its own DB, not this repo)
+license-server/*.db
+license-server/__pycache__/

@@ -9,7 +9,7 @@ from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
-from shortsforge import fonts, previews
+from shortsforge import fonts, licensing, previews
 from shortsforge.config import Settings
 from shortsforge.downloader import SourceItem, expand
 from shortsforge.pipeline import Pipeline, StyleChoice
@@ -37,6 +37,7 @@ class QueueWorker(QThread):
     progress = Signal(int, str, float, str)      # job_id, stage, frac, detail
     short_ready = Signal(int, dict)
     job_state = Signal(int, str, str)            # job_id, state, message
+    license_blocked = Signal(str)                # trial used up / license invalid: show the upgrade dialog
 
     def __init__(self):
         super().__init__()
@@ -83,6 +84,11 @@ class QueueWorker(QThread):
             except Cancelled:
                 self.job_state.emit(job_id, "cancelled", "Cancelled")
                 self.log.emit(f"✖ Cancelled: {item.title}")
+            except licensing.LicenseError as e:
+                self.job_state.emit(job_id, "failed", str(e))
+                self.log.emit(f"✖ {item.title}: {e}")
+                if e.kind == "blocked":
+                    self.license_blocked.emit(str(e))
             except Exception as e:
                 msg = str(e).strip().split("\n")[0][:300]
                 self.log.emit(f"✖ {item.title}: {e}\n{traceback.format_exc(limit=3)}")

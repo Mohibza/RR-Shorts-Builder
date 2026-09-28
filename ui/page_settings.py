@@ -8,7 +8,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSlider, QStackedWidget, QSpinBox, QVBoxLayout, QWidget)
 
-from shortsforge import cookies, fonts
+from shortsforge import cookies, fonts, licensing
 from shortsforge.config import CACHE_DIR, MODELS_DIR, Settings, data_dir
 from shortsforge.utils import ToolMissing, find_ffmpeg, open_path, pick_encoder, set_ffmpeg_override
 
@@ -324,6 +324,20 @@ class SettingsPage(QWidget):
         self._panel("Auto-watch", "calendar", c)
         self.update_watch_status()
         self.w_on.toggled.connect(lambda _on: self._save_watch())
+
+        # License
+        c = Card()
+        c.lay.addWidget(label("License", "H2"))
+        c.lay.addWidget(label("Every Rebels Revolt Shorts download gets 3 free Shorts to try. After that, activate "
+                              "a license key to keep going. It's tied to this PC.", "Muted", wrap=True))
+        self.lic_status = label("Checking…", "")
+        c.lay.addWidget(self.lic_status)
+        lb = QPushButton(" Manage license")
+        lb.setIcon(theme.icon("key"))
+        lb.clicked.connect(self.manage_license)
+        c.lay.addWidget(lb, 0, Qt.AlignLeft)
+        self._panel("License", "key", c)
+        self.update_license_status()
         self.cats.setCurrentRow(0)
         self.update_font_status()
         self._fw = None
@@ -387,6 +401,28 @@ class SettingsPage(QWidget):
         browser_login.sign_out()
         self.update_yt()
         self.saved.emit()
+
+    def update_license_status(self):
+        if not licensing.enabled():
+            self.lic_status.setText("Your own copy (run from the project folder): no trial limits. "
+                                    "Installer builds you give to others use the license check.")
+            self.lic_status.setStyleSheet(f"color: {theme.GOOD}; font-weight: 600;")
+            return
+        s = licensing.current_state()
+        if s.status == "active":
+            self.lic_status.setText(f"✓ Licensed{f' ({s.plan})' if s.plan else ''}")
+            self.lic_status.setStyleSheet(f"color: {theme.GOOD}; font-weight: 600;")
+        elif s.status in ("trial", "unknown"):
+            self.lic_status.setText(f"Trial: {s.videos_left} of {s.videos_allowed} Shorts left")
+            self.lic_status.setStyleSheet(f"color: {theme.TEXT if s.videos_left else theme.BAD}; font-weight: 600;")
+        else:
+            self.lic_status.setText("Trial used up")
+            self.lic_status.setStyleSheet(f"color: {theme.BAD}; font-weight: 600;")
+
+    def manage_license(self):
+        from .license_dialog import show_license
+        show_license(self.window())
+        self.update_license_status()
 
     def update_font_status(self):
         miss = fonts.missing_fonts()

@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableDelayedExpansion
-title RR Shorts Builder - build installer
+title Rebels Revolt Shorts - build installer
 cd /d "%~dp0"
 echo.
 echo  ===========================================================
-echo    Building RR-Shorts-Builder-Setup.exe (share it with anyone -
+echo    Building Rebels-Revolt-Shorts-Setup.exe (share it with anyone -
 echo    they don't need Python, FFmpeg or anything else)
 echo  ===========================================================
 echo.
@@ -18,6 +18,7 @@ set "PY=.venv\Scripts\python.exe"
 echo [1/6] Updating build tools...
 "%PY%" -m pip install -q --upgrade pip >nul
 "%PY%" -m pip install -q -r requirements.txt || (echo Package install failed & pause & exit /b 1)
+if not exist "web\dist\index.html" (echo  The interface files web\dist are missing. & pause & exit /b 1)
 "%PY%" -m pip install -q --upgrade pyinstaller || (echo PyInstaller install failed & pause & exit /b 1)
 
 echo [2/6] Packaging the app (takes a few minutes)...
@@ -85,7 +86,7 @@ echo [6/6] Building the installer...
 
 echo.
 echo  ===========================================================
-echo    DONE:  installer_output\RR-Shorts-Builder-Setup-1.6.0.exe
+echo    DONE:  installer_output\Rebels-Revolt-Shorts-Setup-2.1.1.exe
 echo    Send that one file to your friend.
 echo  ===========================================================
 explorer "installer_output"

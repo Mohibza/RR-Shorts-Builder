@@ -41,6 +41,7 @@ class RenderJob:
     fps: int = 30
     crf: int = 20
     encoder: str = "auto"
+    speed: str = "fast"
     keep: list = field(default_factory=list)     # jump-cut ranges [(a, b)] relative to start; empty = all
     sfx: str = ""                                # pre-mixed sound-effects WAV
     # stitched Shorts: [(abs_start, abs_end, keep_ranges_relative)] in playback order. Empty = one piece.
@@ -49,6 +50,8 @@ class RenderJob:
     frame_x: float = 0.0
     frame_y: float = 0.0
     frame_zoom: float = 1.0
+    # fast mode: `src` is a downloaded section that starts at this absolute source time
+    src_offset: float = 0.0
 
     def pieces(self) -> list:
         return [tuple(p) for p in self.parts] if self.parts else [(self.start, self.end, self.keep)]
@@ -86,7 +89,8 @@ def layout_graph(job: RenderJob) -> list[str]:
     sw, sh = job.src_w or 1920, job.src_h or 1080
     pre = "[vsrc]setsar=1"
     layout = job.layout
-    if sw / max(sh, 1) <= 0.62 and layout in ("smart_crop", "center_crop", "split"):
+    from .effects import CROP_LAYOUTS
+    if sw / max(sh, 1) <= 0.62 and layout in CROP_LAYOUTS:
         layout = "blur_fit"  # source already vertical-ish
     z = min(2.0, max(1.0, float(job.frame_zoom or 1.0)))
     fx = min(1.0, max(-1.0, float(job.frame_x or 0.0)))
@@ -104,6 +108,81 @@ def layout_graph(job: RenderJob) -> list[str]:
                 x = f"min(max(0,({x})+{dx:.1f}),{sw - cw})"
             y = f"{(sh - ch) / 2 * (1 + fy):.0f}"
             return [f"{pre},crop=w={cw}:h={ch}:x='{x}':y={y},scale={W}:{H}:flags=lanczos{_sharpen(H / ch)},setsar=1[base]"]
+    def cam_for(cw: int) -> str:
+        """Crop-left expression for a window `cw` wide, following the face (camera is for a 9:16 window)."""
+        cam = job.camera
+        if cam:
+            k = (sh * 9 / 16 - cw) / 2
+            cam = [(t, min(max(0.0, x + k), max(0.0, sw - cw))) for t, x in cam]
+        x = x_expression(cam) if cam else f"{max(0, (sw - cw) / 2):.0f}"
+        if fx:
+            x = f"min(max(0,({x})+{fx * (sw - cw) / 2:.1f}),{max(0, sw - cw)})"
+        return x
+
+    if layout in ("zoom45", "square"):
+        # a 4:5 or 1:1 window of the frame (face-follow) on the blurred background
+        ow, oh = (W, _even(W * 5 / 4)) if layout == "zoom45" else (W, W)
+        ch = _even(sh / z)
+        cw = _even(min(sw, ch * ow / oh))
+        ch = _even(cw * oh / ow)
+        y = f"{(sh - ch) / 2 * (1 + fy):.0f}"
+        oy = int((H - oh) / 2 - H * 0.03)
+        return [
+            f"{pre},split=2[s1][s2]",
+            _blur_bg("s1", "bg", W, H),
+            f"[s2]crop=w={cw}:h={ch}:x='{cam_for(cw)}':y={y},scale={ow}:{oh}:flags=lanczos{_sharpen(oh / ch)},setsar=1[fg]",
+            f"[bg][fg]overlay=0:{oy},setsar=1[base]",
+        ]
+    if layout == "two_speakers":
+        # side-by-side podcast: left person on top, right person below
+        half_h = H // 2
+        cw = _even(sw / 2)
+        ch = _even(min(sh, cw * half_h / W))
+        cw = _even(ch * W / half_h)
+        y = f"{max(0, (sh - ch) * 0.35 * (1 + fy)):.0f}"
+        lx = max(0, int(sw / 4 - cw / 2 + fx * sw / 8))
+        rx = min(sw - cw, int(3 * sw / 4 - cw / 2 + fx * sw / 8))
+        sc = f"scale={W}:{half_h}:flags=lanczos{_sharpen(half_h / ch)},setsar=1"
+        return [
+            f"{pre},split=2[s1][s2]",
+            f"[s1]crop=w={cw}:h={ch}:x={lx}:y={y},{sc}[top]",
+            f"[s2]crop=w={cw}:h={ch}:x={rx}:y={y},{sc}[bot]",
+            "[top][bot]vstack=inputs=2,drawbox=x=0:y=ih/2-3:w=iw:h=6:color=black@0.9:t=fill,setsar=1[base]",
+        ]
+    if layout == "black_fit":
+        fit = min(W / sw, H / sh) * z
+        fw, fh = _even(min(W, sw * fit)), _even(min(H, sh * fit))
+        return [f"{pre},scale={_even(sw * fit)}:{_even(sh * fit)}:flags=lanczos{_sharpen(fit)},"
+                f"crop={fw}:{fh},pad={W}:{H}:{(W - fw) / 2 * (1 + fx):.0f}:{(H - fh) / 2 * (1 + fy):.0f}:black,setsar=1[base]"]
+    if layout == "framed":
+        # the video as a card with a white border on the blurred background
+        fw = _even(W * 0.9 * min(z, 1.1))
+        fh = _even(fw * sh / sw)
+        if fh > H * 0.7:
+            fh = _even(H * 0.7)
+            fw = _even(fh * sw / sh)
+        bd = 10
+        ox, oy = (W - fw - 2 * bd) // 2, int((H - fh - 2 * bd) / 2 * (1 + fy * 0.8))
+        return [
+            f"{pre},split=2[s1][s2]",
+            _blur_bg("s1", "bg", W, H),
+            f"[s2]scale={fw}:{fh}:flags=lanczos{_sharpen(fw / sw)},pad={fw + 2 * bd}:{fh + 2 * bd}:{bd}:{bd}:white,setsar=1[fg]",
+            f"[bg]drawbox=x={ox + 14}:y={oy + 22}:w={fw + 2 * bd}:h={fh + 2 * bd}:color=black@0.45:t=fill[bgs]",
+            f"[bgs][fg]overlay={ox}:{oy},setsar=1[base]",
+        ]
+    if layout == "split_reverse":
+        top_h = H // 2
+        cw = _even(sh * W / top_h)
+        if cw > sw:
+            cw = _even(sw)
+        return [
+            f"{pre},split=3[s1][s2][s3]",
+            f"[s1]crop=w={cw}:h={sh}:x='{cam_for(cw)}':y=0,scale={W}:{top_h}:flags=lanczos{_sharpen(top_h / sh)},setsar=1[bot]",
+            _blur_bg("s2", "tbg", W, H - top_h),
+            f"[s3]scale={W}:-2:flags=lanczos[tfg]",
+            "[tbg][tfg]overlay=(W-w)/2:(H-h)/2[top]",
+            "[top][bot]vstack=inputs=2,setsar=1[base]",
+        ]
     if layout == "split":
         top_h = H // 2
         cw = _even(sh * W / top_h)
@@ -155,7 +234,7 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
     args: list[str] = []
     g: list[str] = []
     for i, (a, b, keep) in enumerate(pieces):
-        args += ["-ss", f"{a:.3f}", "-t", f"{max(0.1, b - a):.3f}", "-i", job.src]
+        args += ["-ss", f"{max(0.0, a - job.src_offset):.3f}", "-t", f"{max(0.1, b - a):.3f}", "-i", job.src]
         v = f"[{i}:v]fps={job.fps},setsar=1"
         v += f",select='{select_expr(keep)}',setpts=N/FRAME_RATE/TB" if keep else ",setpts=PTS-STARTPTS"
         g.append(v + f"[pv{i}]")
@@ -247,7 +326,7 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
     args += ["-filter_complex", ";".join(g), "-map", "[vout]"]
     if amap:
         args += ["-map", amap, "-c:a", "aac", "-b:a", "256k"]
-    args += encoder_args(enc, job.crf) + ["-r", str(job.fps), "-t", f"{D:.3f}",
+    args += encoder_args(enc, job.crf, job.speed) + ["-r", str(job.fps), "-t", f"{D:.3f}",
                                           "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
                                           "-movflags", "+faststart", job.out_path]
     return args
@@ -327,6 +406,6 @@ def preview_frame(job: RenderJob, t: float, out_png: str, width: int = 720) -> s
     g.append(f"[{cur}]ass=filename={filter_path(j.ass_file)}:fontsdir={filter_path(str(fonts.fonts_dir()))},"
              f"scale={width}:-2:flags=bicubic[vout]")
     out_png = str(Path(out_png).resolve())
-    run_ffmpeg(["-ss", f"{source_time(j, t):.3f}", "-i", src, "-filter_complex", ";".join(g), "-map", "[vout]",
+    run_ffmpeg(["-ss", f"{max(0.0, source_time(j, t) - j.src_offset):.3f}", "-i", src, "-filter_complex", ";".join(g), "-map", "[vout]",
                 "-frames:v", "1", "-update", "1", out_png], 1.0, cwd=ffmpeg_cwd())
     return out_png

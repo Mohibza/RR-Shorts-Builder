@@ -23,7 +23,7 @@ QSS = f"""
 QMainWindow, QWidget#Root, QDialog, QMessageBox, QInputDialog {{ background: {BG}; }}
 QWidget#Sidebar {{ background: {PANEL}; border-right: 1px solid {BORDER}; }}
 QFrame#SidePanel {{ background: {PANEL}; border-left: 1px solid {BORDER}; }}
-QLabel#Logo {{ font-size: 15pt; font-weight: 700; padding: 2px 0; letter-spacing: 0.2px; }}
+QLabel#Logo {{ font-size: 12.5pt; font-weight: 700; padding: 2px 0; letter-spacing: 0.2px; }}
 QLabel#LogoSub {{ color: {MUTED}; font-size: 8pt; }}
 QPushButton#Nav {{
     text-align: left; padding: 10px 12px; border: none; border-radius: 8px;
@@ -141,6 +141,7 @@ _ICONS = {
     "upload": '<path d="M12 20V9M7 13l5-5 5 5M5 4h14"/>',
     "calendar": '<rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/>',
     "send": '<path d="M4 12l16-8-6 16-3-7z"/>',
+    "camera": '<rect x="3" y="3" width="18" height="18" rx="5"/><circle cx="12" cy="12" r="4"/><circle cx="17.5" cy="6.5" r="0.8"/>',
     "pin": '<path d="M9 4h6l-1 6 4 4H6l4-4z"/><path d="M12 14v7"/>',
     "move": '<path d="M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"/>',
     "globe": '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
@@ -170,7 +171,7 @@ def icon(name: str, color: str = TEXT, size: int = 20, fill: bool = False) -> QI
 
 
 def _draw_logo(s: int) -> QPixmap:
-    """RR Shorts Builder logo: gradient tile, bold "RR" and a play badge."""
+    """Rebels Revolt Shorts logo: gradient tile, bold "RR" and a play badge."""
     from PySide6.QtCore import QPointF, QRectF
     from PySide6.QtGui import QBrush, QColor, QFont, QFontDatabase, QLinearGradient, QPolygonF
     global _LOGO_FAMILY

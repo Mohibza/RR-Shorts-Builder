@@ -69,6 +69,41 @@ def usable_output_dir(preferred: str) -> tuple[Path, bool]:
     return p, False
 
 
+def usable_music_dir(preferred: str) -> tuple[Path, bool]:
+    """A music folder we can really write to (Windows' ransomware protection often blocks Music), and whether
+    we had to fall back. The fallback is kept so downloads, made tracks and imports always work."""
+    p = Path(preferred).expanduser() if preferred else Path.home() / "Music" / "RR Shorts Music"
+    if _writable(p):
+        return p, False
+    for alt in (Path.home() / "RR Shorts" / "Music", data_dir() / "Music"):
+        if _writable(alt):
+            return alt, True
+    return p, False
+
+
+def music_folder(save: bool = True) -> Path:
+    """Current music folder; switches (and remembers) a writable one if the saved folder is blocked."""
+    s = Settings.load()
+    d, moved = usable_music_dir(s.music_dir)
+    if moved and save:
+        # keep the tracks that were already there usable: copy them over once
+        try:
+            import shutil
+            old = Path(s.music_dir)
+            if old.is_dir():
+                for f in old.iterdir():
+                    if f.is_file() and not (d / f.name).exists():
+                        shutil.copy2(f, d / f.name)
+        except OSError:
+            pass
+        s.music_dir = str(d)
+        try:
+            s.save()
+        except OSError:
+            pass
+    return d
+
+
 ASSETS = app_root() / "assets"
 BUNDLED_FONTS = ASSETS / "fonts"
 MUSIC_DIR_DEFAULT = Path.home() / "Music" / "RR Shorts Music"
@@ -94,6 +129,9 @@ class Settings:
     quality_crf: int = 18
     source_quality: int = 1440       # max download height (sharper crops)
     encoder: str = "auto"            # auto | libx264 | h264_nvenc | h264_qsv | h264_amf
+    encode_speed: str = "fast"       # fast (2-3x quicker, same look on phones) | quality
+    fast_mode: bool = True           # YouTube links: audio first, then only the chosen parts in HD
+    auto_export: bool = True         # new interface: render every found clip right after analysis
 
     # Clip selection
     shorts_per_video: int = 5
@@ -102,7 +140,7 @@ class Settings:
     min_gap: float = 5.0             # seconds between chosen clips
 
     # Transcription
-    whisper_model: str = "small"     # tiny | base | small | medium | large-v3
+    whisper_model: str = "auto"      # auto (turbo on GPU, small on CPU) | tiny | base | small | medium | large-v3-turbo
     language: str = "auto"           # spoken language: auto or ISO code (en, ur, hi, ...)
     caption_lang: str = "roman"      # roman (Latin letters: Roman Urdu / English) | auto | en | ur | hi
     use_gpu: bool = False            # NVIDIA CUDA for Whisper (needs CUDA 12 libs)
@@ -133,7 +171,7 @@ class Settings:
     music_auto: bool = True          # auto-level music against the voice
     music_mode: str = "random"       # random (any track) | starred (only starred tracks)
     music_selected: list = field(default_factory=list)
-    sfx_level: str = "medium"        # off | subtle | medium | high  (generated, copyright-free)
+    sfx_level: str = "auto"          # off | auto | subtle | medium | high  (generated, copyright-free)
     sfx_volume: float = 0.55
     remove_pauses: bool = True       # jump-cut dead air for faster pacing
     jamendo_client_id: str = ""      # free key for in-app Jamendo search
@@ -164,7 +202,8 @@ class Settings:
     upload_quiet_start: int = 1      # no uploads between these hours (local time); equal = off
     upload_quiet_end: int = 8
     yt_privacy: str = "public"       # public | unlisted | private
-    tiktok_audited: bool = False     # TikTok approved your app -> public posts (else "only me")
+    tiktok_audited: bool = False
+    web_upload_visible: bool = False # show the browser window during direct-sign-in uploads     # TikTok approved your app -> public posts (else "only me")
     yt_client_id: str = ""
     yt_client_secret: str = ""
     fb_app_id: str = ""
@@ -177,7 +216,7 @@ class Settings:
     cookies_browser: str = ""        # e.g. chrome, edge, firefox (for yt-dlp)
 
     extra: dict = field(default_factory=dict)
-    settings_version: int = 3
+    settings_version: int = 4
 
     @classmethod
     def load(cls) -> "Settings":
@@ -196,7 +235,12 @@ class Settings:
                     s.caption_lang, s.part_label = "roman", False
                     if s.clip_picker == "local":
                         s.clip_picker = "gemini"
-                s.settings_version = 3
+                if ver < 4:  # v2.1: sound effects adapt to each clip
+                    if s.sfx_level == "medium":
+                        s.sfx_level = "auto"
+                    if s.whisper_model == "small":
+                        s.whisper_model = "auto"
+                s.settings_version = 4
             except Exception:
                 pass
         return s

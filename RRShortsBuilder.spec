@@ -19,10 +19,19 @@ for pkg in ("cv2", "yt_dlp_ejs", "certifi"):
         datas += collect_data_files(pkg)
     except Exception:
         pass
-datas += [("assets", "assets")]
-hiddenimports += ["shortsforge.selftest", "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSvg"]
+datas += [("assets", "assets"), ("web/dist", "web/dist")]
+hiddenimports += ["shortsforge.selftest", "shortsforge.server", "shortsforge.engine", "shortsforge.projects",
+                  "shortsforge.virality", "shortsforge.musicgen", "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSvg"]
+for pkg in ("webview", "clr_loader", "pythonnet"):     # the app window (WebView2); optional
+    try:
+        d, b, h = collect_all(pkg)
+        datas += d
+        binaries += b
+        hiddenimports += h
+    except Exception:
+        pass
 
-excludes = ["tkinter", "matplotlib", "IPython", "pytest", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
+excludes = ["tkinter",  "matplotlib", "IPython", "pytest", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
             "PySide6.QtWebEngineQuick", "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtQuick3D",
             "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf", "PySide6.QtDesigner",
             "PySide6.QtBluetooth", "PySide6.QtLocation", "PySide6.QtPositioning", "PySide6.QtSensors",

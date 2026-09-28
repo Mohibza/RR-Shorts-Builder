@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableDelayedExpansion
-title RR Shorts Builder - upload to a private GitHub repo
+title Rebels Revolt Shorts - upload to a private GitHub repo
 cd /d "%~dp0"
 echo.
 echo  ===========================================================
-echo    Upload RR Shorts Builder to a PRIVATE GitHub repository
+echo    Upload Rebels Revolt Shorts to a PRIVATE GitHub repository
 echo  ===========================================================
 echo.
 set "REPO=RR-Shorts-Builder"
@@ -48,14 +48,14 @@ if not exist ".git" "!GIT!" init -b main >nul
 "!GIT!" config user.name >nul 2>&1 || "!GIT!" config user.name "!ME!"
 "!GIT!" config user.email >nul 2>&1 || "!GIT!" config user.email "!MYID!+!ME!@users.noreply.github.com"
 "!GIT!" add -A
-"!GIT!" commit -q -m "RR Shorts Builder" >nul 2>&1
+"!GIT!" commit -q -m "Rebels Revolt Shorts" >nul 2>&1
 "!GIT!" log -1 --oneline >nul 2>&1 || (echo  Nothing to upload? & pause & exit /b 1)
 
 REM ---------- Create the private repo and push ----------
 echo [5/5] Uploading to github.com/!ME!/%REPO% (private)...
 "!GH!" repo view "!ME!/%REPO%" >nul 2>&1
 if errorlevel 1 (
-    "!GH!" repo create "%REPO%" --private --source . --remote origin --push --description "RR Shorts Builder - AI Shorts generator for Windows" || (echo  Upload failed - see the message above. & pause & exit /b 1)
+    "!GH!" repo create "%REPO%" --private --source . --remote origin --push --description "Rebels Revolt Shorts - AI Shorts generator for Windows" || (echo  Upload failed - see the message above. & pause & exit /b 1)
 ) else (
     "!GIT!" remote get-url origin >nul 2>&1 || "!GIT!" remote add origin "https://github.com/!ME!/%REPO%.git"
     "!GIT!" push -u origin main || (echo  Upload failed - see the message above. & pause & exit /b 1)

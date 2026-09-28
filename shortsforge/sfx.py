@@ -158,7 +158,64 @@ def riser(seed=9):
     return _stereo(_norm(y * (t / t[-1]) ** 2 * np.minimum(1, (t[-1] - t) / 0.03), 0.6))
 
 
+def sparkle(seed=10):
+    """Bright rising three-note shimmer (for 'wow / amazing' moments)."""
+    t = _t(0.7)
+    y = np.zeros(len(t))
+    for i, f in enumerate((1568.0, 2093.0, 2637.0)):
+        k = int(SR * i * 0.06)
+        tt = t[: len(t) - k]
+        y[k:] += np.sin(2 * np.pi * f * tt) * np.exp(-tt * 7) * (0.8 - i * 0.15)
+        y[k:] += np.sin(2 * np.pi * f * 2.01 * tt) * np.exp(-tt * 11) * 0.2
+    y += _bandpass(_noise(len(t), seed), 6000, 12000) * np.exp(-t * 9) * 0.15
+    return _stereo(_norm(y, 0.55), np.linspace(-0.4, 0.4, len(t)))
+
+
+def thud(seed=11):
+    """Short deep hit, softer than the boom."""
+    t = _t(0.35)
+    f = 90 * np.exp(-t * 9) + 45
+    y = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 11)
+    y += _onepole_lp(_noise(len(t), seed), 300) * np.exp(-t * 40)
+    return _stereo(_norm(np.tanh(y * 1.8), 0.85))
+
+
+def zap(seed=12):
+    """Quick laser zap (for 'fast / instant / speed')."""
+    t = _t(0.22)
+    f = 2400 * np.exp(-t * 14) + 180
+    y = np.sign(np.sin(2 * np.pi * np.cumsum(f) / SR)) * np.exp(-t * 12)
+    y = _onepole_lp(y, 5000)
+    return _stereo(_norm(y, 0.4), np.linspace(0.5, -0.5, len(t)))
+
+
+def click(seed=13):
+    """Crisp UI click."""
+    t = _t(0.05)
+    y = _bandpass(_noise(len(t), seed), 2000, 9000) * np.exp(-t * 500)
+    y += np.sin(2 * np.pi * 1200 * t) * np.exp(-t * 300) * 0.5
+    return _stereo(_norm(y, 0.6))
+
+
+def bass_drop(seed=14):
+    """Long sub-bass sweep down (big reveal)."""
+    t = _t(1.3)
+    f = 160 * np.exp(-t * 2.4) + 32
+    y = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.minimum(1, t / 0.02) * np.exp(-t * 1.8)
+    return _stereo(_norm(np.tanh(y * 2.5), 0.9))
+
+
+def swoosh_down(seed=15):
+    t = _t(0.45)
+    n = len(t)
+    f = np.linspace(5000, 400, n)
+    y = _bandpass(_noise(n, seed), f * 0.35, f)
+    env = np.sin(np.pi * np.clip(t / t[-1], 0, 1)) ** 0.8
+    return _stereo(_norm(y * env, 0.75), np.linspace(0.7, -0.7, n))
+
+
 GENERATORS = {
+    "sparkle": sparkle, "thud": thud, "zap": zap, "click": click, "bass_drop": bass_drop, "swoosh_down": swoosh_down,
     "whoosh": lambda: whoosh(1), "whoosh2": lambda: whoosh(11, 0.45), "rise": lambda: whoosh(21, 0.4, up=True),
     "swipe": swipe, "pop": pop, "pop_hi": lambda: pop(13, 1.4), "pop_lo": lambda: pop(23, 0.7),
     "key1": lambda: key(4), "key2": lambda: key(14), "key3": lambda: key(24), "key4": lambda: key(34),
@@ -204,12 +261,31 @@ MATCH_WORDS = {
              "lakh", "million", "billion", "profit", "income", "salary", "rich", "sale", "sales", "earn", "kamai"},
     "boom": {"never", "nahi", "nahin", "kabhi", "stop", "mistake", "ghalti", "galti", "fail", "failed", "danger",
              "warning", "shocking", "crazy", "boom", "lost", "khatam", "khtm", "worst"},
+    "zap": {"fast", "quick", "quickly", "instant", "instantly", "speed", "jaldi", "foran", "turant", "seconds",
+            "minute", "minutes", "now", "abhi"},
+    "sparkle": {"magic", "beautiful", "perfect", "shine", "dream", "khubsurat", "khoobsurat", "wonderful", "love",
+                "pyar", "happy", "khush"},
     "pop_hi": {"wow", "amazing", "zabardast", "kamal", "kamaal", "best", "secret", "raaz", "trick", "hack", "free",
                "easy", "simple", "asaan", "win", "success", "kamyab", "kamiab"},
 }
 # the longest stretch without any sound before a light "pattern interrupt" is added (keeps attention)
 RETENTION_GAP = {"subtle": 8.0, "medium": 4.5, "high": 3.0}
-FILLERS = [("swipe", 0.22), ("pop_hi", 0.2), ("whoosh2", 0.24), ("key1", 0.22), ("glitch", 0.14), ("pop", 0.2)]
+FILLERS = [("swipe", 0.22), ("pop_hi", 0.2), ("whoosh2", 0.24), ("click", 0.24), ("key1", 0.22), ("sparkle", 0.16),
+           ("swoosh_down", 0.2), ("glitch", 0.14), ("pop", 0.2), ("zap", 0.12), ("thud", 0.22)]
+SFX_LEVELS = ("off", "auto", "subtle", "medium", "high")
+
+
+def resolve_level(level: str, words: list[dict], dur: float) -> str:
+    """'auto' picks the sound-design intensity from the clip itself: fast talkers get more, calm clips less."""
+    if level != "auto":
+        return level
+    wps = len(words) / max(1.0, dur)
+    loud = sum(1 for w in words if w["w"].rstrip().endswith(("!", "?"))) / max(1, len(words))
+    if wps >= 3.0 or loud > 0.12:
+        return "high"
+    if wps < 1.8:
+        return "subtle"
+    return "medium"
 
 
 def plan(level: str, dur: float, words: list[dict], chunk_starts: list[float], caption_style: dict,
@@ -220,6 +296,7 @@ def plan(level: str, dur: float, words: list[dict], chunk_starts: list[float], c
     seams = [(t, removed_seconds, is_part_join)] where the Short jumps (pauses cut / parts joined): each gets a
     transition sound. After everything else, gaps longer than RETENTION_GAP get a light pattern interrupt on the
     next word so the sound design keeps moving all the way through."""
+    level = resolve_level(level, words, dur)
     if level == "off":
         return []
     ev = _plan_core(level, dur, words, chunk_starts, caption_style, hook_anim, intro, motion, punch_times,
@@ -249,7 +326,7 @@ def _plan_retention(level: str, dur: float, words: list[dict], chunk_starts: lis
             k = re.sub(r"[^\w']", "", w["w"].lower())
             snd = next((s for s, ks in MATCH_WORDS.items() if k in ks), None)
             if snd and w["s"] > 1.0 and w["s"] - last > 3.5:
-                out.append((w["s"], snd, {"ding": 0.4, "boom": 0.32, "pop_hi": 0.3}[snd]))
+                out.append((w["s"], snd, {"ding": 0.4, "boom": 0.32, "pop_hi": 0.3, "zap": 0.2, "sparkle": 0.3}[snd]))
                 last = w["s"]
             elif w["w"].rstrip().endswith("?") and i + 1 < len(words) and words[i + 1]["s"] - last > 3.0:
                 out.append((words[i + 1]["s"] - 0.05, "rise", 0.3))
@@ -340,6 +417,8 @@ def _plan_core(level: str, dur: float, words: list[dict], chunk_starts: list[flo
             last = w["s"]
     if level == "high" and dur > 12:
         ev.append((max(0.0, dur - 3.2), "riser", 0.4))
+        if hook_anim in ("pop", "glitch"):
+            ev.append((0.02, "bass_drop", 0.35))
     return ev
 
 
@@ -350,7 +429,7 @@ def mix_track(events: list[tuple[float, str, float]], dur: float, out_path: str,
         return None
     n = int(SR * (dur + 1.5))
     track = np.zeros((n, 2), dtype=np.float32)
-    g0 = volume * LEVEL_GAIN.get(level, 1.0)
+    g0 = volume * LEVEL_GAIN.get(level, 1.0 if level != "subtle" else 0.6)
     for t, name, g in events:
         s = sound(name)
         a = int(max(0.0, t) * SR)

@@ -149,6 +149,17 @@ def ensure_model(size: str, on_progress: Optional[Callable[[float, str], None]] 
     return result["path"]
 
 
+_GPU_BROKEN = False
+
+
+def cuda_available() -> bool:
+    try:
+        import ctranslate2
+        return ctranslate2.get_cuda_device_count() > 0
+    except Exception:
+        return False
+
+
 def load_model(size: str, use_gpu: bool, log: Optional[Callable[[str], None]] = None, path: Optional[str] = None):
     from faster_whisper import WhisperModel
 
@@ -184,7 +195,7 @@ def transcribe(
     duration: float,
     model_size: str = "small",
     language: str = "auto",
-    use_gpu: bool = False,
+    use_gpu: Optional[bool] = False,
     on_progress: Optional[Callable[[float, str], None]] = None,
     cancel: Optional[threading.Event] = None,
     log: Optional[Callable[[str], None]] = None,
@@ -216,45 +227,63 @@ def transcribe(
             log(f"Downloading the '{model_size}' speech model (one time only)…")
         path = ensure_model(model_size, lambda f, d: stage("Downloading AI speech model (one time)", f, d), cancel)
     stage("Loading AI speech model", 0.0, "")
+    global _GPU_BROKEN
+    if use_gpu is None:                     # auto: use an NVIDIA GPU when one is present and working
+        use_gpu = cuda_available() and not _GPU_BROKEN
     model, on_gpu = load_model(model_size, use_gpu, log, path)
     if cancel is not None and cancel.is_set():
         raise Cancelled()
 
-    from faster_whisper import BatchedInferencePipeline
-    batched = BatchedInferencePipeline(model=model)
-    if on_progress:
-        on_progress(0.0, "Starting…")
-    segments, info = batched.transcribe(
-        wav,
-        language=force_lang,
-        task=task,
-        word_timestamps=True,
-        vad_filter=True,
-        batch_size=16 if on_gpu else 8,
-        beam_size=5 if on_gpu else 1,   # greedy on CPU is ~2x faster with nearly the same accuracy
-    )
-    if log:
-        log(f"Detected language: {info.language} ({info.language_probability:.0%})")
-    out = {"language": "en" if task == "translate" else info.language, "spoken": info.language, "segments": []}
-    t0 = time.time()
-    for seg in segments:
-        if cancel is not None and cancel.is_set():
-            raise Cancelled()
-        words = [
-            {"w": w.word.strip(), "s": round(w.start, 3), "e": round(w.end, 3), "p": round(w.probability, 3)}
-            for w in (seg.words or []) if w.word.strip()
-        ]
-        out["segments"].append({"start": round(seg.start, 3), "end": round(seg.end, 3),
-                                "text": seg.text.strip(), "words": words})
-        if on_progress and duration > 0:
-            f = min(1.0, seg.end / duration)
-            el = time.time() - t0
-            eta = ""
-            if f > 0.03:
-                left = el / f * (1 - f)
-                eta = f" · ~{int(left // 60)} min {int(left % 60)} s left"
-            on_progress(f, f"{int(seg.end) // 60}:{int(seg.end) % 60:02d} / {int(duration) // 60}:"
-                           f"{int(duration) % 60:02d}{eta}")
+    def run(model, on_gpu) -> dict:
+        from faster_whisper import BatchedInferencePipeline
+        batched = BatchedInferencePipeline(model=model)
+        if on_progress:
+            on_progress(0.0, "Starting…" + (" (GPU)" if on_gpu else ""))
+        segments, info = batched.transcribe(
+            wav,
+            language=force_lang,
+            task=task,
+            word_timestamps=True,
+            vad_filter=True,
+            batch_size=16 if on_gpu else 8,
+            beam_size=5 if on_gpu else 1,   # greedy on CPU is ~2x faster with nearly the same accuracy
+        )
+        if log:
+            log(f"Detected language: {info.language} ({info.language_probability:.0%})")
+        out = {"language": "en" if task == "translate" else info.language, "spoken": info.language, "segments": []}
+        t0 = time.time()
+        for seg in segments:
+            if cancel is not None and cancel.is_set():
+                raise Cancelled()
+            words = [
+                {"w": w.word.strip(), "s": round(w.start, 3), "e": round(w.end, 3), "p": round(w.probability, 3)}
+                for w in (seg.words or []) if w.word.strip()
+            ]
+            out["segments"].append({"start": round(seg.start, 3), "end": round(seg.end, 3),
+                                    "text": seg.text.strip(), "words": words})
+            if on_progress and duration > 0:
+                f = min(1.0, seg.end / duration)
+                el = time.time() - t0
+                eta = ""
+                if f > 0.03:
+                    left = el / f * (1 - f)
+                    eta = f" · ~{int(left // 60)} min {int(left % 60)} s left"
+                on_progress(f, f"{int(seg.end) // 60}:{int(seg.end) % 60:02d} / {int(duration) // 60}:"
+                               f"{int(duration) % 60:02d}{eta}")
+        return out
+
+    try:
+        out = run(model, on_gpu)
+    except Cancelled:
+        raise
+    except Exception as e:
+        if not on_gpu:
+            raise
+        _GPU_BROKEN = True                  # e.g. CUDA/cuDNN libraries missing: finish on the CPU instead
+        if log:
+            log(f"GPU speech recognition failed ({str(e)[:120]}); continuing on the CPU")
+        model, on_gpu = load_model(model_size, False, log, path)
+        out = run(model, on_gpu)
     out["segments"].sort(key=lambda s: s["start"])
     cache.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
     return out

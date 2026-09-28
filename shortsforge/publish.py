@@ -36,7 +36,7 @@ GRAPH = "https://graph.facebook.com/v25.0"
 RUPLOAD = "https://rupload.facebook.com/video-upload/v25.0"
 FB_REDIRECT = "http://localhost:53682/"
 TT_REDIRECT = "http://localhost:53683/callback/"
-PLATFORMS = {"youtube": "YouTube", "facebook": "Facebook Page", "tiktok": "TikTok"}
+PLATFORMS = {"youtube": "YouTube", "facebook": "Facebook", "instagram": "Instagram", "tiktok": "TikTok"}
 UA = "RRShortsBuilder/1.5"
 
 # overridable for tests
@@ -124,6 +124,10 @@ def _upsert(platform: str, acc: dict) -> dict:
 def remove_account(platform: str, acc_id: str) -> None:
     with _lock:
         data = load_accounts()
+        for a in data.get(platform, []):
+            if a.get("id") == acc_id and a.get("mode") == "browser" and a.get("profile"):
+                from . import webupload          # also delete that account's private browser profile
+                webupload.remove_profile(a)
         data[platform] = [a for a in data[platform] if a.get("id") != acc_id]
         save_accounts(data)
 
@@ -211,7 +215,7 @@ class _Catcher(http.server.BaseHTTPRequestHandler):
         type(self).result = {k: v[0] for k, v in q.items()}
         ok = "code" in q
         page = ("<html><body style='font-family:Segoe UI,Arial;background:#0B0D12;color:#E8EAF0;text-align:center;"
-                "padding-top:18vh'><h2>" + ("✓ Connected to RR Shorts Builder" if ok else "Sign-in was cancelled")
+                "padding-top:18vh'><h2>" + ("✓ Connected to Rebels Revolt Shorts" if ok else "Sign-in was cancelled")
                 + "</h2><p>You can close this tab and go back to the app.</p></body></html>")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -393,14 +397,15 @@ def youtube_upload(acc: dict, video: str, meta: dict, s, progress: Progress = la
 FB_SCOPES = "pages_show_list,pages_read_engagement,pages_manage_posts"
 
 
-def facebook_connect(app_id: str, app_secret: str, open_browser=webbrowser.open) -> list[dict]:
+def _meta_login(app_id: str, app_secret: str, scopes: str, open_browser=webbrowser.open) -> str:
+    """Facebook Login (Meta app) -> long-lived user token."""
     if not app_id.strip() or not app_secret.strip():
         raise PublishError("Add your Meta App ID and App secret first (see the setup guide).")
     state = secrets.token_urlsafe(16)
 
     def url(redirect):
         return ENDPOINTS["fb_dialog"] + "?" + urllib.parse.urlencode({
-            "client_id": app_id.strip(), "redirect_uri": redirect, "state": state, "scope": FB_SCOPES,
+            "client_id": app_id.strip(), "redirect_uri": redirect, "state": state, "scope": scopes,
             "response_type": "code"})
     q, redirect = _browser_auth(url, "localhost", 53682, "/", open_browser=open_browser)
     if q.get("state") != state:
@@ -412,8 +417,14 @@ def facebook_connect(app_id: str, app_secret: str, open_browser=webbrowser.open)
     long = _req("GET", g + "/oauth/access_token?" + urllib.parse.urlencode({
         "grant_type": "fb_exchange_token", "client_id": app_id.strip(), "client_secret": app_secret.strip(),
         "fb_exchange_token": short["access_token"]}))
+    return long["access_token"]
+
+
+def facebook_connect(app_id: str, app_secret: str, open_browser=webbrowser.open) -> list[dict]:
+    token = _meta_login(app_id, app_secret, FB_SCOPES, open_browser)
+    g = ENDPOINTS["graph"]
     pages = _req("GET", g + "/me/accounts?" + urllib.parse.urlencode({
-        "fields": "id,name,access_token,tasks", "limit": 100, "access_token": long["access_token"]}))
+        "fields": "id,name,access_token,tasks", "limit": 100, "access_token": token}))
     got = []
     for p in pages.get("data") or []:
         if p.get("access_token"):
@@ -448,6 +459,70 @@ def facebook_upload(acc: dict, video: str, meta: dict, s, progress: Progress = l
         raise PublishError(f"Facebook didn't publish the Reel: {fin}", retry=True)
     progress(1.0)
     return {"id": vid, "url": f"https://www.facebook.com/reel/{vid}", "note": "published"}
+
+
+# ================================================================ Instagram (Graph API, Business/Creator accounts)
+IG_SCOPES = FB_SCOPES + ",instagram_basic,instagram_content_publish,business_management"
+
+
+def instagram_connect(app_id: str, app_secret: str, open_browser=webbrowser.open) -> list[dict]:
+    token = _meta_login(app_id, app_secret, IG_SCOPES, open_browser)
+    g = ENDPOINTS["graph"]
+    pages = _req("GET", g + "/me/accounts?" + urllib.parse.urlencode({
+        "fields": "id,name,access_token,instagram_business_account{id,username}", "limit": 100,
+        "access_token": token}))
+    got = []
+    for p in pages.get("data") or []:
+        ig = p.get("instagram_business_account") or {}
+        if ig.get("id") and p.get("access_token"):
+            got.append(_upsert("instagram", {"id": ig["id"], "name": "@" + ig.get("username", "instagram"),
+                                             "token": p["access_token"]}))
+    if not got:
+        raise PublishError("No Instagram Business/Creator account found. In the Instagram app switch to a "
+                           "Professional account and link it to your Facebook Page, then connect again. "
+                           "(Or use Sign in, which works with any account.)")
+    return got
+
+
+def instagram_upload(acc: dict, video: str, meta: dict, s, progress: Progress = lambda f: None) -> dict:
+    g, tok, ig = ENDPOINTS["graph"], acc["token"], acc["id"]
+    caption = (meta.get("title", "") + "\n\n" + meta.get("description", "")).strip()[:2150]
+    cont = _req("POST", f"{g}/{ig}/media", form={"media_type": "REELS", "upload_type": "resumable",
+                                                 "caption": caption, "share_to_feed": "true", "access_token": tok})
+    cid = cont.get("id")
+    up = cont.get("uri") or f"{ENDPOINTS['rupload'].replace('video-upload', 'ig-api-upload')}/{cid}"
+    if not cid:
+        raise PublishError(f"Instagram didn't start the upload: {cont}", retry=True)
+    size = Path(video).stat().st_size
+    with open(video, "rb") as f:
+        data = f.read()
+    progress(0.1)
+    r = _req("POST", up, data=data, timeout=600, headers={"Authorization": f"OAuth {tok}", "offset": "0",
+                                                          "file_size": str(size)})
+    if r.get("success") is False:
+        raise PublishError(f"Instagram upload failed: {r}", retry=True)
+    progress(0.5)
+    for _ in range(120):                      # Instagram processes the video (usually < 1 minute)
+        st = _req("GET", f"{g}/{cid}?" + urllib.parse.urlencode({"fields": "status_code,status",
+                                                                 "access_token": tok}))
+        code = st.get("status_code")
+        if code == "FINISHED":
+            break
+        if code in ("ERROR", "EXPIRED"):
+            raise PublishError(f"Instagram rejected the video: {st.get('status') or code}")
+        time.sleep(5)
+    else:
+        raise PublishError("Instagram is still processing the video. Will retry.", retry=True)
+    pub = _req("POST", f"{g}/{ig}/media_publish", form={"creation_id": cid, "access_token": tok})
+    mid = pub.get("id", "")
+    link = "https://www.instagram.com/"
+    try:
+        link = _req("GET", f"{g}/{mid}?" + urllib.parse.urlencode({"fields": "permalink",
+                                                                  "access_token": tok})).get("permalink", link)
+    except PublishError:
+        pass
+    progress(1.0)
+    return {"id": mid, "url": link, "note": "reel published"}
 
 
 # ================================================================ TikTok
@@ -559,13 +634,16 @@ def tiktok_upload(acc: dict, video: str, meta: dict, s, progress: Progress = lam
 
 
 # ================================================================ dispatch
-CONNECT = {"youtube": youtube_connect, "facebook": facebook_connect, "tiktok": tiktok_connect}
-UPLOAD = {"youtube": youtube_upload, "facebook": facebook_upload, "tiktok": tiktok_upload}
+CONNECT = {"youtube": youtube_connect, "facebook": facebook_connect, "instagram": instagram_connect,
+           "tiktok": tiktok_connect}
+UPLOAD = {"youtube": youtube_upload, "facebook": facebook_upload, "instagram": instagram_upload,
+          "tiktok": tiktok_upload}
 
 
 def credentials_ok(platform: str, s) -> bool:
     return {"youtube": bool(s.yt_client_id.strip() and s.yt_client_secret.strip()),
             "facebook": bool(s.fb_app_id.strip() and s.fb_app_secret.strip()),
+            "instagram": bool(s.fb_app_id.strip() and s.fb_app_secret.strip()),
             "tiktok": bool(s.tt_client_key.strip() and s.tt_client_secret.strip())}[platform]
 
 
@@ -574,6 +652,8 @@ def connect(platform: str, s, open_browser=webbrowser.open):
         return youtube_connect(s.yt_client_id, s.yt_client_secret, open_browser)
     if platform == "facebook":
         return facebook_connect(s.fb_app_id, s.fb_app_secret, open_browser)
+    if platform == "instagram":
+        return instagram_connect(s.fb_app_id, s.fb_app_secret, open_browser)
     return tiktok_connect(s.tt_client_key, s.tt_client_secret, open_browser)
 
 
@@ -583,4 +663,7 @@ def upload(platform: str, acc_id: str, video: str, meta: dict, s, progress: Prog
         raise PublishError(f"The {PLATFORMS[platform]} account is no longer connected.")
     if not Path(video).exists():
         raise PublishError("The video file was moved or deleted.")
+    if acc.get("mode") == "browser":            # direct sign-in: the app's browser uses the normal upload page
+        from . import webupload
+        return webupload.upload(platform, video, meta, s, progress, acc)
     return UPLOAD[platform](acc, video, meta, s, progress)
