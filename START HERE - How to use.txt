@@ -124,10 +124,11 @@ Settings page
 
 For ALL platforms, change these from the defaults:
   - Add the free Gemini key (see step 3). This is the biggest improvement.
-  - Caption style: pick ONE bold style instead of "Random mix", e.g.
-    "Bold Highlight", "Beast Mode" or "Highlight Box". Some random styles
-    (Clean Minimal, Typewriter) are too small to read on a phone.
-    You can also remove weak styles from the random mix on the Styles page.
+  - Caption style: "Random mix" only uses bold, phone-readable styles.
+    For a consistent channel look, pick ONE style instead, e.g.
+    "Bold Highlight", "Beast Mode" or "Highlight Box". The small styles
+    (Clean Minimal, Karaoke Sweep, Typewriter, Caption Card) are left out of
+    the mix; you can add them back on the Styles page.
   - Watermark: your own handle, e.g.  @yourchannel
   - If you have an NVIDIA card: Settings -> turn on "Use NVIDIA GPU" and
     set Transcription quality to "Best (large-v3 turbo)". Captions become

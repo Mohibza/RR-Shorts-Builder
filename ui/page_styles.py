@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QTabWid
 
 from shortsforge import previews
 from shortsforge.captions import CAPTION_STYLES, CTA_STYLES, HOOK_STYLES
-from shortsforge.config import Settings
+from shortsforge.config import DEFAULT_CAPTION_POOL, Settings
 from shortsforge.effects import COLOR_GRADES
 
 from . import theme
@@ -224,7 +224,7 @@ class StylesPage(QWidget):
     def all_random(self):
         for a in ("caption_style", "hook_style", "cta_style", "color_grade", "motion", "intro"):
             setattr(self.s, a, "random")
-        self.s.caption_pool, self.s.hook_pool = [], []
+        self.s.caption_pool, self.s.hook_pool = list(DEFAULT_CAPTION_POOL), []
         self.s.save()
         idx = self.tabs.currentIndex()
         self.build()

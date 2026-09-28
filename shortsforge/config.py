@@ -85,6 +85,9 @@ except OSError:
     pass
 
 
+# the bold, phone-readable caption styles; Clean Minimal, Karaoke Sweep, Typewriter and Caption Card render
+# small (size 115-130) and read poorly on a phone, so "random" leaves them out unless the user adds them back
+DEFAULT_CAPTION_POOL = ("hormozi", "beast", "boxed", "neon", "oneword", "comic", "marker", "slide", "pill", "hollow")
 SECRET_FIELDS = ("gemini_api_key", "anthropic_api_key", "yt_client_secret", "fb_app_secret", "tt_client_secret")
 
 
@@ -120,7 +123,7 @@ class Settings:
     color_grade: str = "random"
     motion: str = "random"
     intro: str = "random"
-    caption_pool: list = field(default_factory=list)   # styles used by "random" (empty = all)
+    caption_pool: list = field(default_factory=lambda: list(DEFAULT_CAPTION_POOL))  # used by "random" (empty = all)
     hook_pool: list = field(default_factory=list)
     hook_title: bool = True
     cta_text: str = "Follow for more"
@@ -181,7 +184,7 @@ class Settings:
     cookies_browser: str = ""        # e.g. chrome, edge, firefox (for yt-dlp)
 
     extra: dict = field(default_factory=dict)
-    settings_version: int = 3
+    settings_version: int = 4
 
     @classmethod
     def load(cls) -> "Settings":
@@ -200,7 +203,9 @@ class Settings:
                     s.caption_lang, s.part_label = "roman", False
                     if s.clip_picker == "local":
                         s.clip_picker = "gemini"
-                s.settings_version = 3
+                if ver < 4 and not s.caption_pool:  # "all styles" included ones too small to read on a phone
+                    s.caption_pool = list(DEFAULT_CAPTION_POOL)
+                s.settings_version = 4
             except Exception:
                 pass
         return s
