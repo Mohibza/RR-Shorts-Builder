@@ -79,7 +79,8 @@ class QueueWorker(QThread):
                     cancel=ev,
                 )
                 res = p.process(item)
-                self.job_state.emit(job_id, "done", f"{len(res)} Shorts ready · {settings.output_dir}")
+                bad = f" · {len(p.failed)} failed (see log)" if p.failed else ""
+                self.job_state.emit(job_id, "done", f"{len(res)} Shorts ready{bad} · {settings.output_dir}")
             except Cancelled:
                 self.job_state.emit(job_id, "cancelled", "Cancelled")
                 self.log.emit(f"✖ Cancelled: {item.title}")

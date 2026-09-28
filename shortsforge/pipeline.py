@@ -170,6 +170,7 @@ class Pipeline:
         self.progress = progress
         self.on_short = on_short
         self.cancel = cancel or threading.Event()
+        self.failed: list[tuple[int, str]] = []   # (Short number, error) of Shorts that couldn't be rendered
         set_ffmpeg_override(settings.ffmpeg_path)
 
     def _check(self):
@@ -179,6 +180,7 @@ class Pipeline:
     def process(self, item: SourceItem) -> list[ShortResult]:
         s = self.s
         P = self.progress
+        self.failed = []
         self.log(f"▶ {item.title}")
         fonts.fonts_dir()
 
@@ -263,12 +265,22 @@ class Pipeline:
             span = 0.30 / n
             P(f"Rendering Short {i + 1}/{n}", base, clip.title)
             choice = rot.choice(i)
-            res = self.render_clip(src, info, item, transcript, clip, choice, i, out_dir, work,
-                                   lambda f, b=base, sp=span, k=i: P(f"Rendering Short {k + 1}/{n}", b + sp * f, ""))
+            try:
+                res = self.render_clip(src, info, item, transcript, clip, choice, i, out_dir, work,
+                                       lambda f, b=base, sp=span, k=i: P(f"Rendering Short {k + 1}/{n}", b + sp * f, ""))
+            except Cancelled:
+                raise
+            except Exception as e:  # one bad Short must not cost the user the others
+                self.failed.append((i + 1, str(e).strip().split("\n")[0][:200]))
+                self.log(f"  ✖ Short {i + 1} failed, continuing with the rest: {e}")
+                continue
             results.append(res)
             self.on_short(res)
-        P("Done", 1.0, f"{len(results)} Shorts ready")
-        self.log(f"✔ {len(results)} Shorts saved to {out_dir}")
+        if not results and self.failed:
+            raise RuntimeError(f"All {n} Shorts failed to render. First error: {self.failed[0][1]}")
+        summary = f"{len(results)} Shorts ready" + (f" ({len(self.failed)} failed, see log)" if self.failed else "")
+        P("Done", 1.0, summary)
+        self.log(f"✔ {summary} · saved to {out_dir}")
         return results
 
     # ------------------------------------------------------------------
