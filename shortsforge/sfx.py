@@ -374,7 +374,7 @@ def _plan_core(level: str, dur: float, words: list[dict], chunk_starts: list[flo
         ev.append((0.0, "shutter", 0.8))
     elif intro == "shake":
         ev.append((0.0, "boom", 0.9))
-    elif intro == "fade_black":
+    elif intro in ("fade_black", "fade_white"):
         ev.append((0.0, "rise", 0.6))
     hook_sfx = {"pop": [("boom", 0.7), ("pop_lo", 0.6)], "drop": [("whoosh", 0.7)], "slide": [("swipe", 0.8)],
                 "flicker": [("glitch", 0.5)], "glitch": [("glitch", 0.7), ("boom", 0.4)], "fade": [("whoosh2", 0.4)]}

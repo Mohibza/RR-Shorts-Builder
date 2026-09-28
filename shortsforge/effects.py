@@ -15,6 +15,18 @@ COLOR_GRADES: dict[str, dict] = {
     "hdr": dict(name="Crisp HDR Pop", vf="unsharp=5:5:0.7:5:5:0.0,eq=saturation=1.25:contrast=1.08"),
     "dream": dict(name="Soft Dream", vf="eq=brightness=0.03:saturation=1.1:contrast=0.96,"
                                         "colorbalance=rh=0.04:bh=0.05"),
+    "teal": dict(name="Teal Pop", vf="colorbalance=rs=-0.08:bs=0.1:rm=-0.05:bm=0.08,eq=saturation=1.1:contrast=1.05"),
+    "golden": dict(name="Golden Hour", vf="colorbalance=rs=0.08:gs=0.03:bs=-0.1:rm=0.06:bm=-0.06,eq=saturation=1.15:gamma=1.03"),
+    "matte": dict(name="Matte Film", vf="curves=all='0/0.06 0.5/0.5 1/0.94',eq=saturation=0.9"),
+    "cyberpunk": dict(name="Cyberpunk", vf="colorbalance=rs=0.1:gs=-0.08:bs=0.15:rh=0.05:bh=0.1,eq=saturation=1.3:contrast=1.1"),
+    "noir": dict(name="Noir", vf="hue=s=0,eq=contrast=1.45:brightness=-0.03,vignette=angle=PI/3.5"),
+    "sepia": dict(name="Sepia", vf="colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131,eq=contrast=1.05"),
+    "pastel": dict(name="Pastel", vf="eq=saturation=0.75:brightness=0.05:contrast=0.92,colorbalance=rh=0.03:bh=0.04"),
+    "night": dict(name="Night Blue", vf="colorbalance=rs=-0.05:bs=0.12:bm=0.08,eq=brightness=-0.06:saturation=0.85:contrast=1.1"),
+    "sunrise": dict(name="Sunrise", vf="colorbalance=rs=0.1:gs=0.02:bs=-0.06:rh=0.06,eq=saturation=1.2:brightness=0.02"),
+    "punchy": dict(name="Extra Punchy", vf="eq=saturation=1.5:contrast=1.15,unsharp=5:5:0.6:5:5:0.0"),
+    "faded": dict(name="Faded", vf="curves=all='0/0.1 1/0.9',eq=saturation=0.8"),
+    "emerald": dict(name="Emerald", vf="colorbalance=rs=-0.04:gs=0.08:gm=0.06,eq=saturation=1.15"),
 }
 
 MOTIONS: dict[str, str] = {
@@ -25,6 +37,10 @@ MOTIONS: dict[str, str] = {
     "punch": "Punch Zooms (on key words)",
     "breathe": "Breathing Pulse",
     "sway": "Handheld Sway",
+    "pan_left": "Slow Pan Left",
+    "pan_right": "Slow Pan Right",
+    "drift_up": "Drift Up",
+    "zoom_pulse": "Beat Pulse",
 }
 
 INTROS: dict[str, str] = {
@@ -32,6 +48,7 @@ INTROS: dict[str, str] = {
     "flash": "White Flash",
     "fade_black": "Fade From Black",
     "shake": "Impact Shake",
+    "fade_white": "Fade From White",
 }
 
 LAYOUTS: dict[str, str] = {
@@ -81,6 +98,15 @@ def motion_filters(motion: str, dur: float, punch_times: list[float], intro: str
         z = "(1.02+0.12*(" + ("+".join(terms) or "0") + "))"
     elif motion == "breathe":
         z = f"(1.035+0.025*sin({t}*2.2))"
+    elif motion in ("pan_left", "pan_right"):
+        z = "1.1"
+        sgn = -1 if motion == "pan_left" else 1
+        dx = f"{sgn}*(W-W/1.1)/2*0.9*(2*{t}/{D:.2f}-1)"
+    elif motion == "drift_up":
+        z = "1.08"
+        dy = f"-(H-H/1.08)/2*0.9*(2*{t}/{D:.2f}-1)"
+    elif motion == "zoom_pulse":
+        z = f"(1.04+0.03*pow(abs(sin({t}*3.14159*1.0)),6))"
     elif motion == "sway":
         z = "1.08"
         dx = f"(W-W/1.08)/2*0.8*sin({t}*0.55)"

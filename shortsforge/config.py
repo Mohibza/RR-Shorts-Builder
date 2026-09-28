@@ -132,6 +132,7 @@ class Settings:
     encode_speed: str = "fast"       # fast (2-3x quicker, same look on phones) | quality
     fast_mode: bool = True           # YouTube links: audio first, then only the chosen parts in HD
     auto_export: bool = True         # new interface: render every found clip right after analysis
+    export_prefs: dict = field(default_factory=lambda: {"preset": "youtube"})   # size / fps / quality / codec / srt
 
     # Clip selection
     shorts_per_video: int = 5

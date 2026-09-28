@@ -12,7 +12,7 @@ from .utils import ffmpeg_cwd, filter_path, run_ffmpeg
 PREV = CACHE_DIR / "previews"
 PREV.mkdir(parents=True, exist_ok=True)
 SAMPLE = ["This", "changed", "everything", "for", "me", "in", "2026"]
-BG = "gradients=s=540x960:c0=0x1d2671:c1=0xc33764:c2=0x0f2027:x0=0:y0=0:x1=540:y1=960:speed=0.0001:duration=2"
+BG = "gradients=s=540x960:c0=0x1d2671:c1=0xc33764:c2=0x0f2027:x0=0:y0=0:x1=540:y1=960:speed=0.0001:duration=12"
 
 
 def _words():

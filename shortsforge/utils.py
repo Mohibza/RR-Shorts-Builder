@@ -281,6 +281,29 @@ def pick_encoder(preference: str = "auto") -> str:
     return _ENC_CACHE[preference]
 
 
+def pick_hevc_encoder(preference: str = "auto") -> str:
+    """Working H.265/HEVC encoder (GPU first). Falls back to libx265, then to H.264 if HEVC isn't available."""
+    key = "hevc:" + preference
+    if key in _ENC_CACHE:
+        return _ENC_CACHE[key]
+    gpu = {"h264_nvenc": "hevc_nvenc", "h264_qsv": "hevc_qsv", "h264_amf": "hevc_amf"}
+    order = ["hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265"] if preference == "auto" else \
+        [gpu.get(preference, "libx265"), "libx265"]
+    ff = find_ffmpeg()
+    pick = ""
+    for enc in order:
+        try:
+            r = run([ff, "-hide_banner", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2",
+                     "-c:v", enc, "-f", "null", "-"], timeout=20)
+            if r.returncode == 0:
+                pick = enc
+                break
+        except Exception:
+            continue
+    _ENC_CACHE[key] = pick or pick_encoder(preference)
+    return _ENC_CACHE[key]
+
+
 def _pick_encoder(preference: str = "auto") -> str:
     order = ["h264_nvenc", "h264_qsv", "h264_amf", "libx264"] if preference == "auto" else [preference, "libx264"]
     ff = find_ffmpeg()
@@ -298,6 +321,18 @@ def _pick_encoder(preference: str = "auto") -> str:
 def encoder_args(enc: str, crf: int, speed: str = "fast") -> list[str]:
     """H.264 settings tuned for Shorts. "fast" keeps the look (YouTube re-encodes anyway) at 2-3x the speed."""
     fast = speed != "quality"
+    if enc in ("hevc_nvenc", "hevc_qsv", "hevc_amf", "libx265"):
+        hc = ["-tag:v", "hvc1", "-pix_fmt", "yuv420p", "-g", "60"]
+        if enc == "hevc_nvenc":
+            return ["-c:v", enc, "-preset", "p4" if fast else "p7", "-rc", "vbr", "-cq", str(crf + 2), "-b:v", "0",
+                    "-maxrate", "18M", "-bufsize", "36M"] + hc
+        if enc == "hevc_qsv":
+            return ["-c:v", enc, "-global_quality", str(crf + 2), "-preset", "faster" if fast else "slower"] + hc
+        if enc == "hevc_amf":
+            return ["-c:v", enc, "-quality", "balanced" if fast else "quality", "-rc", "cqp", "-qp_i", str(crf + 2),
+                    "-qp_p", str(crf + 4)] + hc
+        return ["-c:v", "libx265", "-preset", "fast" if fast else "medium", "-crf", str(crf + 3),
+                "-x265-params", "log-level=error"] + hc
     common = ["-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60"]
     if enc == "h264_nvenc":
         return ["-c:v", enc, "-preset", "p4" if fast else "p7", "-tune", "hq", "-rc", "vbr", "-cq", str(crf),

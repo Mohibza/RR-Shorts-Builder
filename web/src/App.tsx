@@ -2,6 +2,7 @@ import { useEffect, useMemo } from "react";
 import { TOKEN } from "./lib/api";
 import { go, refreshAll, setState, startEvents, useStore } from "./lib/store";
 import { Icon } from "./components/Icon";
+import { setFontMetrics } from "./components/ClipPlayer";
 import { Btn } from "./components/ui";
 import { CreatePage } from "./pages/Create";
 import { ProjectsPage } from "./pages/Projects";
@@ -22,6 +23,8 @@ const NAV: [string, string, string][] = [
 
 function FontFaces() {
   const fonts = useStore((s) => s.catalog?.fonts);
+  const metrics = useStore((s) => (s.catalog as any)?.metrics);
+  setFontMetrics(metrics);
   const css = useMemo(() => Object.entries(fonts || {}).map(([fam, file]) =>
     `@font-face{font-family:"${fam}";src:url("/fonts/${encodeURIComponent(file)}") format("truetype");font-display:swap}`).join("\n"), [fonts]);
   return <style>{css}</style>;

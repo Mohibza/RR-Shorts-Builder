@@ -28,6 +28,33 @@ FONT_SOURCES: dict[str, tuple[str, str]] = {
                              GF + "ofl/notosansdevanagari/NotoSansDevanagari%5Bwdth,wght%5D.ttf"),
 }
 
+GF2 = "https://raw.githubusercontent.com/google/fonts/main/"
+FONT_SOURCES.update({
+    "Bungee": ("Bungee-Regular.ttf", GF2 + "ofl/bungee/Bungee-Regular.ttf"),
+    "Righteous": ("Righteous-Regular.ttf", GF2 + "ofl/righteous/Righteous-Regular.ttf"),
+    "Pacifico": ("Pacifico-Regular.ttf", GF2 + "ofl/pacifico/Pacifico-Regular.ttf"),
+    "Lobster": ("Lobster-Regular.ttf", GF2 + "ofl/lobster/Lobster-Regular.ttf"),
+    "Russo One": ("RussoOne-Regular.ttf", GF2 + "ofl/russoone/RussoOne-Regular.ttf"),
+    "Black Ops One": ("BlackOpsOne-Regular.ttf", GF2 + "ofl/blackopsone/BlackOpsOne-Regular.ttf"),
+    "Staatliches": ("Staatliches-Regular.ttf", GF2 + "ofl/staatliches/Staatliches-Regular.ttf"),
+    "Titan One": ("TitanOne-Regular.ttf", GF2 + "ofl/titanone/TitanOne-Regular.ttf"),
+    "Chewy": ("Chewy-Regular.ttf", GF2 + "apache/chewy/Chewy-Regular.ttf"),
+    "Bowlby One": ("BowlbyOne-Regular.ttf", GF2 + "ofl/bowlbyone/BowlbyOne-Regular.ttf"),
+    "Passion One": ("PassionOne-Regular.ttf", GF2 + "ofl/passionone/PassionOne-Regular.ttf"),
+    "Lilita One": ("LilitaOne-Regular.ttf", GF2 + "ofl/lilitaone/LilitaOne-Regular.ttf"),
+    "Monoton": ("Monoton-Regular.ttf", GF2 + "ofl/monoton/Monoton-Regular.ttf"),
+    "Kanit Black": ("Kanit-Black.ttf", GF2 + "ofl/kanit/Kanit-Black.ttf"),
+    "Caveat Brush": ("CaveatBrush-Regular.ttf", GF2 + "ofl/caveatbrush/CaveatBrush-Regular.ttf"),
+    "Shrikhand": ("Shrikhand-Regular.ttf", GF2 + "ofl/shrikhand/Shrikhand-Regular.ttf"),
+    "Bungee Shade": ("BungeeShade-Regular.ttf", GF2 + "ofl/bungeeshade/BungeeShade-Regular.ttf"),
+    "Press Start 2P": ("PressStart2P-Regular.ttf", GF2 + "ofl/pressstart2p/PressStart2P-Regular.ttf"),
+    "Sigmar One": ("SigmarOne-Regular.ttf", GF2 + "ofl/sigmarone/SigmarOne-Regular.ttf"),
+    "Alfa Slab One": ("AlfaSlabOne-Regular.ttf", GF2 + "ofl/alfaslabone/AlfaSlabOne-Regular.ttf"),
+    "Special Elite": ("SpecialElite-Regular.ttf", GF2 + "apache/specialelite/SpecialElite-Regular.ttf"),
+    "Satisfy": ("Satisfy-Regular.ttf", GF2 + "apache/satisfy/Satisfy-Regular.ttf"),
+    "Boogaloo": ("Boogaloo-Regular.ttf", GF2 + "ofl/boogaloo/Boogaloo-Regular.ttf"),
+})
+
 # If a font can't be downloaded, Windows always has these.
 WINDOWS_FALLBACK = {
     "Anton": "Impact", "Bebas Neue": "Impact", "Luckiest Guy": "Arial Black",
@@ -35,6 +62,7 @@ WINDOWS_FALLBACK = {
     "Poppins Black": "Arial Black", "Archivo Black": "Arial Black", "Rubik Mono One": "Arial Black",
     "Noto Nastaliq Urdu": "Arial", "Noto Naskh Arabic": "Arial", "Noto Sans Devanagari": "Nirmala UI",
 }
+WINDOWS_FALLBACK.update({ "Bungee": "Impact", "Righteous": "Segoe UI", "Pacifico": "Segoe Script", "Lobster": "Segoe Script", "Russo One": "Arial Black", "Black Ops One": "Impact", "Staatliches": "Impact", "Titan One": "Arial Black", "Chewy": "Comic Sans MS", "Bowlby One": "Arial Black", "Passion One": "Impact", "Lilita One": "Arial Black", "Monoton": "Impact", "Kanit Black": "Arial Black", "Caveat Brush": "Comic Sans MS", "Shrikhand": "Arial Black", "Bungee Shade": "Impact", "Press Start 2P": "Consolas", "Sigmar One": "Arial Black", "Alfa Slab One": "Rockwell", "Special Elite": "Courier New", "Satisfy": "Segoe Script", "Boogaloo": "Comic Sans MS",})
 
 
 def fonts_dir() -> Path:

@@ -10,7 +10,7 @@ from . import fonts
 from .effects import COLOR_GRADES, motion_filters
 from .facetrack import x_expression
 from .pacing import select_expr
-from .utils import encoder_args, ffmpeg_cwd, filter_path, pick_encoder, run_ffmpeg
+from .utils import encoder_args, ffmpeg_cwd, filter_path, pick_encoder, pick_hevc_encoder, run_ffmpeg
 
 W, H = 1080, 1920
 
@@ -42,6 +42,8 @@ class RenderJob:
     crf: int = 20
     encoder: str = "auto"
     speed: str = "fast"
+    out_h: int = 1920                    # export height (720 / 1080p=1920 / 1440p=2560 / 4K=3840); width follows 9:16
+    codec: str = "h264"                  # h264 (plays everywhere) | hevc (smaller files)
     keep: list = field(default_factory=list)     # jump-cut ranges [(a, b)] relative to start; empty = all
     sfx: str = ""                                # pre-mixed sound-effects WAV
     # stitched Shorts: [(abs_start, abs_end, keep_ranges_relative)] in playback order. Empty = one piece.
@@ -279,9 +281,16 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
     if job.intro == "flash":
         g.append(f"[{cur}]fade=t=in:st=0:d=0.35:color=white[intro]")
         cur = "intro"
+    elif job.intro == "fade_white":
+        g.append(f"[{cur}]fade=t=in:st=0:d=0.7:color=white[intro]")
+        cur = "intro"
     elif job.intro == "fade_black":
         g.append(f"[{cur}]fade=t=in:st=0:d=0.4[intro]")
         cur = "intro"
+    if job.out_h and int(job.out_h) != H:
+        oh = _even(job.out_h)
+        g.append(f"[{cur}]scale={_even(oh * W / H)}:{oh}:flags=lanczos[sized]")
+        cur = "sized"
     g.append(f"[{cur}]format=yuv420p[vout]")
 
     # Audio: voice (jump-cut, loudness-normalised) + optional ducked music + optional sound effects
@@ -322,7 +331,7 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
         g.append(f"{main}alimiter=limit=0.97[aout]")
         amap = "[aout]"
 
-    enc = pick_encoder(job.encoder)
+    enc = pick_encoder(job.encoder) if job.codec != "hevc" else pick_hevc_encoder(job.encoder)
     args += ["-filter_complex", ";".join(g), "-map", "[vout]"]
     if amap:
         args += ["-map", amap, "-c:a", "aac", "-b:a", "256k"]

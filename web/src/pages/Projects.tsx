@@ -8,6 +8,7 @@ import { Btn, Chip, Empty, IconBtn, Progress, Score, timeAgo } from "../componen
 import { fmt, buildTimeline } from "../lib/timeline";
 import { Steps } from "./Create";
 import { PostDialog } from "./Library";
+import { ExportDialog } from "./Editor";
 
 export function useProject(pid: string) {
   const tick = useStore((s) => s.projectTick[pid]);
@@ -67,6 +68,7 @@ function ProjectView({ pid }: { pid: string }) {
   const settings = useStore((s) => s.settings);
   const [post, setPost] = useState<string[] | null>(null);
   const [sort, setSort] = useState<"score" | "time">("score");
+  const [expAll, setExpAll] = useState(false);
   if (err) return <div className="proj-main"><Empty icon="alert" title="Couldn't open this video" text={err} /></div>;
   if (!p) return <div className="proj-main center"><span className="spin big" /></div>;
   const clips = [...p.clips].sort((a, b) => sort === "score" ? b.score - a.score : a.clip.start - b.clip.start);
@@ -88,7 +90,7 @@ function ProjectView({ pid }: { pid: string }) {
         <div className="row gap">
           <div className="seg small"><button className={sort === "score" ? "on" : ""} onClick={() => setSort("score")}>Top score</button><button className={sort === "time" ? "on" : ""} onClick={() => setSort("time")}>Timeline</button></div>
           <IconBtn icon="trash" title="Remove video" onClick={del} />
-          <Btn icon="download" onClick={() => api("/api/project/export", { project: p.id }).then(() => toast("Exporting all clips…", "ok")).catch((e) => toast(e.message, "error"))}>Export all</Btn>
+          <Btn icon="download" onClick={() => setExpAll(true)}>Export all</Btn>
           <Btn kind="primary" icon="rocket" disabled={!exportedPlans.length} onClick={() => setPost(exportedPlans)}>Post exported</Btn>
         </div>
       </div>
@@ -96,6 +98,8 @@ function ProjectView({ pid }: { pid: string }) {
         {clips.map((c) => <ClipCard key={c.id} p={p} c={c} running={running(c)} settings={settings} onPost={(pf) => setPost([pf])} />)}
       </div>
       {post && <PostDialog plans={post} onClose={() => setPost(null)} />}
+      {expAll && <ExportDialog title="Export all clips" onClose={() => setExpAll(false)}
+        onExport={() => api("/api/project/export", { project: p.id }).then(() => toast("Exporting all clips…", "ok")).catch((e) => toast(e.message, "error"))} />}
     </section>
   );
 }

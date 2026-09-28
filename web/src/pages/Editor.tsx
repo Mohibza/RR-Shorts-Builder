@@ -5,7 +5,7 @@ import { absAt, baseParts, buildTimeline, fmt } from "../lib/timeline";
 import type { Clip, Edits, Place, Project, Style } from "../lib/types";
 import { Icon } from "../components/Icon";
 import { ClipPlayer, type PlayerHandle } from "../components/ClipPlayer";
-import { Btn, Chip, Field, IconBtn, Progress, Score, Seg, Select, Slider, Tags, Text, Toggle } from "../components/ui";
+import { Btn, Chip, Field, IconBtn, Modal, Progress, Score, Seg, Select, Slider, Tags, Text, Toggle } from "../components/ui";
 import { useProject } from "./Projects";
 import { PostDialog } from "./Library";
 import { Steps } from "./Create";
@@ -71,6 +71,7 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
   const exporting = task && (task.state === "running" || task.state === "queued");
   const lastExport = task?.state === "done" ? { path: task.path, plan_file: task.plan_file } : c.exports[c.exports.length - 1];
 
+  const [expDlg, setExpDlg] = useState(false);
   const doExport = async (andPost = false) => {
     try {
       await api("/api/clip/export", { project: p.id, clip: c.id, edits });
@@ -105,7 +106,7 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
         <IconBtn icon="undo" title="Undo (Ctrl+Z)" onClick={undo} />
         <Btn icon="frame" busy={frameBusy} onClick={exact} title="Render this exact frame with the real export engine">Exact frame</Btn>
         {exporting ? <div className="ed-prog"><Progress frac={task.state === "running" ? task.frac : 0.02} label={task.state === "running" ? "Exporting" : "Queued"} tone="green" /></div>
-          : <Btn icon="download" onClick={() => doExport(false)}>Export</Btn>}
+          : <Btn icon="download" onClick={() => setExpDlg(true)}>Export</Btn>}
         {lastExport && !exporting && <IconBtn icon="folder" title="Show exported file" onClick={() => api("/api/open", { path: lastExport.path, select: true })} />}
         <Btn kind="glow" icon="rocket" disabled={!!exporting} onClick={() => doExport(true)}>Export & post</Btn>
       </div>
@@ -133,6 +134,7 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
         </div>
       </div>
       {post && <PostDialog plans={[post]} onClose={() => setPost(null)} />}
+      {expDlg && <ExportDialog onClose={() => setExpDlg(false)} onExport={() => doExport(false)} />}
     </div>
   );
 }
@@ -275,48 +277,94 @@ function TranscriptTab({ c, edits, change, T, tl, seek }: { c: Clip; edits: Edit
 const dragging = { current: null as number | null };
 
 // ------------------------------------------------------------------ style
+const CAP_CATS: [string, string][] = [["all", "All"], ["bold", "Bold"], ["boxed", "Boxed"], ["karaoke", "Karaoke"], ["word", "Word by word"],
+  ["fun", "Fun"], ["neon", "Neon"], ["retro", "Retro"], ["script", "Script"], ["clean", "Clean"]];
+const HOOK_CATS: [string, string][] = [["all", "All"], ["bold", "Bold"], ["banner", "Banners"], ["fun", "Fun"], ["neon", "Neon & retro"], ["script", "Script"]];
+
 function StyleTab({ style, change }: { style: Style; change: (f: (e: Edits) => Edits) => void }) {
   const cat = useStore((s) => s.catalog)!;
+  const [sub, setSub] = useState<"captions" | "headings" | "end" | "look">("captions");
+  const [cc, setCc] = useState("all");
+  const [hc, setHc] = useState("all");
+  const [q, setQ] = useState("");
   const set = (patch: Partial<Style>) => change((e) => ({ ...e, style: { ...(e.style || {}), ...patch } }));
   const saveDefault = async () => {
     const { place, ...rest } = style as any;
-    await api("/api/settings", { caption_style: rest.caption_style, hook_style: rest.hook_style || "random", color_grade: rest.color_grade, motion: rest.motion, intro: rest.intro });
+    await api("/api/settings", { caption_style: rest.caption_style, hook_style: rest.hook_style || "random", color_grade: rest.color_grade, motion: rest.motion, intro: rest.intro, cta_style: rest.cta_style || "random" });
     toast("Saved as the look for new videos", "ok");
   };
+  const match = (name: string, c?: string, want?: string) => (want === "all" || c === want) && (!q || name.toLowerCase().includes(q.toLowerCase()));
+  const caps = Object.entries(cat.captions).filter(([, v]) => match(v.name, (v as any).cat, cc));
+  const hooks = Object.entries(cat.hooks).filter(([, v]) => match(v.name, (v as any).cat, hc));
   return (
     <div className="style-tab">
-      <div className="sec-head"><h3>Captions</h3><button className="linkbtn" onClick={saveDefault}>Use this look for new videos</button></div>
-      <div className="cap-grid">
-        {Object.entries(cat.captions).map(([k, cs]) => (
-          <button key={k} className={`cap-card ${style.caption_style === k ? "on" : ""}`} onClick={() => set({ caption_style: k })}>
-            <span className="cap-sample" style={{ fontFamily: `"${cs.font}"`, color: cs.primary, WebkitTextStroke: cs.box || cs.mode === "hollow" ? `1px ${cs.outline}` : `2px ${cs.outline}`,
-              background: cs.box ? cs.outline : undefined, padding: cs.box ? "1px 6px" : undefined, borderRadius: 4, paintOrder: "stroke fill",
-              textShadow: cs.glow ? `0 0 8px ${cs.glow}` : "0 2px 0 rgba(0,0,0,.6)", textTransform: cs.upper ? "uppercase" : "none" } as React.CSSProperties}>
-              Go <span style={{ color: cs.active || cs.primary, background: cs.hl_box, padding: cs.hl_box ? "0 4px" : undefined }}>viral</span>
-            </span>
-            <small>{cs.name}</small>
-          </button>
-        ))}
+      <div className="row gap wrap">
+        <div className="seg small">
+          {([["captions", `Captions ${Object.keys(cat.captions).length}`], ["headings", `Headings ${Object.keys(cat.hooks).length}`], ["end", `End cards ${Object.keys(cat.ctas).length}`], ["look", `Colour & motion ${Object.keys(cat.grades).length}`]] as [typeof sub, string][]).map(([k, l]) =>
+            <button key={k} className={sub === k ? "on" : ""} onClick={() => setSub(k)}>{l}</button>)}
+        </div>
+        <div className="grow" />
+        {(sub === "captions" || sub === "headings") && <div className="search sm"><Icon name="search" size={14} /><input value={q} placeholder="Search templates" onChange={(e) => setQ(e.target.value)} /></div>}
+        <button className="linkbtn small" onClick={saveDefault}>Use this look for new videos</button>
       </div>
-      <div className="sec-head"><h3>Hook heading</h3></div>
-      <div className="chips-row">
-        <button className={`chipbtn ${!style.hook_style ? "on" : ""}`} onClick={() => set({ hook_style: null })}>None</button>
-        {Object.entries(cat.hooks).map(([k, h]) => (
-          <button key={k} className={`chipbtn hookchip ${style.hook_style === k ? "on" : ""}`} onClick={() => set({ hook_style: k })}
-            style={{ fontFamily: `"${h.font}"` }}>
-            <span style={{ color: h.color, background: h.box, WebkitTextStroke: h.outline ? `1px ${h.outline}` : undefined, padding: "0 5px", borderRadius: 3 }}>Aa</span> {h.name}
-          </button>
-        ))}
-      </div>
-      <div className="sec-head"><h3>Colour</h3></div>
-      <div className="chips-row">
-        {Object.entries(cat.grades).map(([k, g]) => <button key={k} className={`chipbtn grade g-${k} ${style.color_grade === k ? "on" : ""}`} onClick={() => set({ color_grade: k })}><i />{g.name}</button>)}
-      </div>
-      <div className="two">
-        <Field label="Camera motion"><Select value={style.motion} options={Object.entries(cat.motions) as [string, string][]} onChange={(v) => set({ motion: v })} /></Field>
-        <Field label="Intro"><Select value={style.intro} options={Object.entries(cat.intros) as [string, string][]} onChange={(v) => set({ intro: v })} /></Field>
-        <Field label="End card"><Select value={style.cta_style || "none"} options={[["none", "None"], ...Object.entries(cat.ctas).map(([k, v]) => [k, v.name] as [string, string])]} onChange={(v) => set({ cta_style: v === "none" ? null : v })} /></Field>
-      </div>
+      {sub === "captions" && (<>
+        <div className="chips-row">{CAP_CATS.map(([k, l]) => <button key={k} className={`chipbtn sm ${cc === k ? "on" : ""}`} onClick={() => setCc(k)}>{l}</button>)}</div>
+        <div className="cap-grid">
+          {caps.map(([k, cs]) => (
+            <button key={k} className={`cap-card ${style.caption_style === k ? "on" : ""}`} onClick={() => set({ caption_style: k })} title={cs.name}>
+              <span className="cap-sample" style={{ fontFamily: `"${cs.font}"`, color: cs.mode === "hollow" ? "transparent" : cs.primary,
+                WebkitTextStroke: cs.box ? undefined : `${cs.mode === "hollow" ? 1.5 : 2}px ${cs.outline}`,
+                background: cs.box ? cs.outline : undefined, padding: cs.box ? "2px 7px" : undefined, borderRadius: 4, paintOrder: "stroke fill",
+                textShadow: cs.glow ? `0 0 8px ${cs.glow}, 0 0 14px ${cs.glow}` : cs.box ? "none" : "0 2px 0 rgba(0,0,0,.6)", textTransform: cs.upper ? "uppercase" : "none" } as React.CSSProperties}>
+                {cs.mode === "oneword" ? <span style={{ color: (cs.palette || [cs.primary])[1] || cs.primary }}>viral</span> : <>Go <span style={{
+                  color: cs.mode === "karaoke" ? cs.primary : cs.mode === "hollow" ? cs.primary : (cs.active || cs.primary), background: cs.hl_box, padding: cs.hl_box ? "0 4px" : undefined, borderRadius: 3 }}>viral</span></>}
+              </span>
+              <small>{cs.name}</small>
+            </button>
+          ))}
+          {!caps.length && <p className="muted small">No caption template matches.</p>}
+        </div>
+      </>)}
+      {sub === "headings" && (<>
+        <div className="chips-row">{HOOK_CATS.map(([k, l]) => <button key={k} className={`chipbtn sm ${hc === k ? "on" : ""}`} onClick={() => setHc(k)}>{l}</button>)}</div>
+        <div className="hook-grid">
+          <button className={`hook-card ${!style.hook_style ? "on" : ""}`} onClick={() => set({ hook_style: null })}><span className="muted">No heading</span><small>None</small></button>
+          {hooks.map(([k, h]) => (
+            <button key={k} className={`hook-card ${style.hook_style === k ? "on" : ""}`} onClick={() => set({ hook_style: k })} title={h.name}>
+              <span style={{ fontFamily: `"${h.font}"`, color: h.color, background: h.box, WebkitTextStroke: h.outline ? `1.5px ${h.outline}` : undefined, paintOrder: "stroke fill",
+                padding: h.box ? "3px 8px" : undefined, borderRadius: 4, textTransform: h.upper ? "uppercase" : "none", transform: `rotate(${h.tilt || 0}deg)`,
+                textShadow: h.glow ? `0 0 10px ${h.glow}` : undefined } as React.CSSProperties}>Watch this</span>
+              <small>{h.name}</small>
+            </button>
+          ))}
+        </div>
+      </>)}
+      {sub === "end" && (
+        <div className="hook-grid">
+          <button className={`hook-card ${!style.cta_style ? "on" : ""}`} onClick={() => set({ cta_style: null })}><span className="muted">No end card</span><small>None</small></button>
+          {Object.entries(cat.ctas).map(([k, c]) => (
+            <button key={k} className={`hook-card ${style.cta_style === k ? "on" : ""}`} onClick={() => set({ cta_style: k })}>
+              <span style={{ fontFamily: `"${c.font}"`, color: c.color, background: c.box, WebkitTextStroke: c.outline ? `1.5px ${c.outline}` : undefined,
+                paintOrder: "stroke fill", padding: c.box ? "3px 10px" : undefined, borderRadius: 999, textTransform: c.font !== "Poppins" ? "uppercase" : "none" } as React.CSSProperties}>Follow for more</span>
+              <small>{c.name}</small>
+            </button>
+          ))}
+        </div>
+      )}
+      {sub === "look" && (<>
+        <div className="sec-head"><h3>Colour</h3></div>
+        <div className="chips-row">
+          {Object.entries(cat.grades).map(([k, g]) => <button key={k} className={`chipbtn grade g-${k} ${style.color_grade === k ? "on" : ""}`} onClick={() => set({ color_grade: k })}><i />{g.name}</button>)}
+        </div>
+        <div className="sec-head"><h3>Camera motion</h3></div>
+        <div className="chips-row">
+          {Object.entries(cat.motions).map(([k, n]) => <button key={k} className={`chipbtn ${style.motion === k ? "on" : ""}`} onClick={() => set({ motion: k })}>{n}</button>)}
+        </div>
+        <div className="sec-head"><h3>Intro</h3></div>
+        <div className="chips-row">
+          {Object.entries(cat.intros).map(([k, n]) => <button key={k} className={`chipbtn ${style.intro === k ? "on" : ""}`} onClick={() => set({ intro: k })}>{n}</button>)}
+        </div>
+      </>)}
     </div>
   );
 }
@@ -467,5 +515,48 @@ export function LayoutPicker({ value, onChange }: { value: string; onChange: (v:
         </button>
       ))}
     </div>
+  );
+}
+
+// ------------------------------------------------------------------ export options (platform presets or custom)
+const RES: [string, string][] = [["1280", "720p"], ["1920", "1080p"], ["2560", "1440p"], ["3840", "4K"]];
+const FPS: [string, string][] = [["0", "Like source"], ["24", "24"], ["30", "30"], ["60", "60"]];
+const QUAL: [string, string][] = [["small", "Small file"], ["balanced", "Balanced"], ["high", "High"], ["max", "Maximum"]];
+
+export function ExportDialog({ onClose, onExport, title = "Export" }: { onClose: () => void; onExport: (prefs: any) => void; title?: string }) {
+  const cat = useStore((s) => s.catalog) as any;
+  const settings = useStore((s) => s.settings);
+  const presets: Record<string, any> = cat?.export_presets || {};
+  const init = settings.export_prefs || { preset: "youtube" };
+  const [p, setP] = useState<any>(() => {
+    const base = presets[init.preset] || {};
+    return { preset: init.preset || "custom", height: init.height ?? base.height ?? 1920, fps: init.fps ?? base.fps ?? 0,
+      quality: init.quality ?? base.quality ?? "high", codec: init.codec ?? base.codec ?? "h264", srt: !!init.srt };
+  });
+  const pick = (k: string) => { const b = presets[k]; setP({ ...p, preset: k, height: b.height, fps: b.fps, quality: b.quality, codec: b.codec }); };
+  const custom = (patch: any) => setP({ ...p, ...patch, preset: "custom" });
+  const go = async () => {
+    await api("/api/settings", { export_prefs: p }).catch(() => {});
+    onExport(p);
+    onClose();
+  };
+  return (
+    <Modal title={title} onClose={onClose} width={640} footer={<><Btn kind="ghost" onClick={onClose}>Cancel</Btn><Btn kind="primary" icon="download" onClick={go}>Export</Btn></>}>
+      <div className="preset-grid">
+        {Object.entries(presets).map(([k, v]) => (
+          <button key={k} className={`preset ${p.preset === k ? "on" : ""}`} onClick={() => pick(k)}>
+            <b>{v.name}</b><small>{RES.find((r) => r[0] === String(v.height))?.[1]} · {v.fps ? `${v.fps} fps` : "source fps"} · {QUAL.find((q) => q[0] === v.quality)?.[1]}</small>
+          </button>
+        ))}
+      </div>
+      <div className="two">
+        <Field label="Resolution"><Seg value={String(p.height)} options={RES} onChange={(v) => custom({ height: Number(v) })} /></Field>
+        <Field label="Frame rate"><Seg value={String(p.fps)} options={FPS} onChange={(v) => custom({ fps: Number(v) })} /></Field>
+        <Field label="Quality"><Seg value={p.quality} options={QUAL} onChange={(v) => custom({ quality: v })} /></Field>
+        <Field label="Format" hint="H.264 plays everywhere. H.265 makes files about 40% smaller."><Seg value={p.codec} options={[["h264", "MP4 · H.264"], ["hevc", "MP4 · H.265"]]} onChange={(v) => custom({ codec: v })} /></Field>
+      </div>
+      <Toggle on={p.srt} onChange={(v) => setP({ ...p, srt: v })} label="Also save a captions file (.srt)" />
+      <p className="muted small">These choices are remembered for “Export all” and automatic exports too.</p>
+    </Modal>
   );
 }

@@ -9,6 +9,23 @@ Paste a YouTube link and Rebels Revolt Shorts turns the long video into ready-to
 5. **Styles every Short differently**: animated captions, hook titles, end cards, color grades, camera motion, intro effects, progress bar, watermark, part labels, and optional background music that gets quieter under speech
 6. **Saves** MP4 + thumbnail + title/description/hashtags text for each Short, ready for you to review and upload
 
+## What's new in 2.2
+
+- **Fixed:** "Exact frame" error (`name 'joblog' is not defined`).
+- **Template library** (Editor → Style), with categories and search:
+  - **53 caption styles**: Bold, Boxed, Karaoke, Word by word, Fun, Neon, Retro, Script, Clean
+  - **28 headings**, **12 end cards**, **22 colour looks**, **11 camera motions** and **5 intros**
+  - **23 new free fonts** are bundled (Bungee, Lilita One, Titan One, Kanit Black, Monoton, Pacifico, Lobster, Press Start 2P, Alfa Slab One and more)
+  - The live preview now sizes text with the exact letter widths the export uses.
+- **Export options**: presets for YouTube Shorts, TikTok, Reels, Best quality (1440p), 4K and Small file (720p). You can also choose:
+  - resolution: 720p / 1080p / 1440p / 4K
+  - frame rate: like source / 24 / 30 / 60
+  - quality: Small / Balanced / High / Maximum
+  - format: MP4 with H.264, or H.265 for smaller files (uses the GPU when it can)
+  - an optional **.srt captions file**
+
+  The choice is remembered for Export all and automatic exports.
+
 ## What's new in 2.1.2
 
 - **ChatGPT as the AI editor.** Paste an OpenAI API key in Settings → AI editor and pick "ChatGPT AI editor". Model "auto" uses the best GPT model your key can use (a fast "mini" model first). Gemini (free), Claude and the offline director still work as before.

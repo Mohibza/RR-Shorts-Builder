@@ -150,10 +150,23 @@ def catalog() -> dict:
         "grades": {k: {"name": v["name"]} for k, v in COLOR_GRADES.items()},
         "motions": MOTIONS, "intros": INTROS, "layouts": LAYOUTS, "wm_positions": WM_POSITIONS,
         "fonts": {fam: fn for fam, (fn, _u) in FONT_SOURCES.items() if (FONTS_DIR / fn).exists()},
+        "metrics": _font_metrics(),
+        "export_presets": _export_presets(),
         "music_sources": {k: {"name": v[0], "note": v[2]} for k, v in BROWSER_SOURCES.items()},
         "platforms": PLATFORMS,
         "packs": STYLE_PACKS,
     }
+
+
+def _export_presets() -> dict:
+    from .pipeline import EXPORT_PRESETS
+    return {k: {"name": v[0], "height": v[1], "fps": v[2], "quality": v[3], "codec": v[4]} for k, v in EXPORT_PRESETS.items()}
+
+
+def _font_metrics() -> dict:
+    from .fonts import FONT_SOURCES, _metrics
+    m = _metrics()
+    return {fam: m[fn] for fam, (fn, _u) in FONT_SOURCES.items() if fn in m}
 
 
 # One-tap looks for the Create page (each is a full style choice)

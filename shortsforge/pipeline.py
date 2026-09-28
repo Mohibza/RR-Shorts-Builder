@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from . import fonts, licensing
+from . import fonts, joblog, licensing
 from .captions import CAPTION_STYLES, CTA_STYLES, HOOK_STYLES, TextPlan, build_ass, chunk_words
 from .config import CACHE_DIR, Settings, usable_output_dir
 from .downloader import (DOWNLOADS, VIDEO_EXT, SourceItem, align_offset, download, download_audio,
@@ -484,6 +484,7 @@ class Pipeline:
         extra["hook_text"] = hook or None
         if edits.get("meta"):
             extra["meta_edit"] = {k: v for k, v in edits["meta"].items() if v not in (None, "")}
+        extra.update(apply_export_prefs(s, edits.get("export") or getattr(s, "export_prefs", None)))
         extra["settings"] = s
         item = SourceItem(project["source"], project["title"], project["id"], bool(project.get("is_local")))
         out_dir = Path(project.get("out_dir") or usable_output_dir(s.output_dir)[0] / safe_name(project["title"]))
@@ -844,11 +845,17 @@ class Pipeline:
             music_auto=getattr(s, "music_auto", True), music_offset=music_offset,
             fps=_out_fps(s.fps, info.get("fps", 30)), crf=s.quality_crf, encoder=s.encoder,
             speed=getattr(s, "encode_speed", "fast"),
-            src_offset=off, **_frame_args(choice.place),
+            src_offset=off, out_h=int(extra.get("out_h") or 1920), codec=extra.get("codec") or "h264",
+            **_frame_args(choice.place),
         )
         t0 = time.time()
         render(job, prog, self.cancel)
         thumb = thumbnail(str(out_path), str(out_path.with_suffix(".jpg")), at=min(1.2, D / 2)) or ""
+        if extra.get("srt"):
+            try:
+                _write_srt(out_path.with_suffix(".srt"), words, cap)
+            except Exception as e:
+                self.log(f"  (captions file skipped: {e})")
         self.log(f"  ✔ {out_path.name}  ({D:.0f}s, rendered in {time.time() - t0:.0f}s)")
 
         credit = music_sources.credit_for(music) if music else ""
@@ -979,6 +986,54 @@ def make_proxy(project: dict, cid: str) -> dict:
             projects.save(p2)
     c["proxy"] = prox
     return prox
+
+
+EXPORT_PRESETS = {
+    # key: (label, height, fps (0 = like the source), quality, codec)
+    "youtube": ("YouTube Shorts", 1920, 0, "high", "h264"),
+    "tiktok": ("TikTok", 1920, 0, "high", "h264"),
+    "reels": ("Instagram / Facebook Reels", 1920, 30, "high", "h264"),
+    "hq": ("Best quality (1440p)", 2560, 0, "max", "h264"),
+    "4k": ("4K", 3840, 0, "max", "h264"),
+    "small": ("Small file (WhatsApp, 720p)", 1280, 30, "small", "h264"),
+}
+QUALITY_CRF = {"small": 26, "balanced": 21, "high": 18, "max": 16}
+
+
+def apply_export_prefs(s: "Settings", ex: Optional[dict]) -> dict:
+    """Export choices (preset or custom) -> changes the settings copy; returns render extras (size, codec, srt)."""
+    ex = dict(ex or {})
+    pre = EXPORT_PRESETS.get(ex.get("preset", ""))
+    h, fps, q, codec = (pre[1], pre[2], pre[3], pre[4]) if pre else (1920, s.fps, "", "h264")
+    h = int(ex.get("height") or h)
+    fps = int(ex.get("fps") if ex.get("fps") is not None else fps)
+    q = ex.get("quality") or q
+    codec = ex.get("codec") or codec
+    s.fps = fps
+    if q in QUALITY_CRF:
+        s.quality_crf = QUALITY_CRF[q]
+        if q == "max":
+            s.encode_speed = "quality"
+    return {"out_h": h if h in (1280, 1920, 2560, 3840) else 1920, "codec": codec if codec in ("h264", "hevc") else "h264",
+            "srt": bool(ex.get("srt"))}
+
+
+def _srt_time(t: float) -> str:
+    ms = int(round(max(0.0, t) * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    sec, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+
+
+def _write_srt(path: Path, words: list, cap: dict) -> None:
+    """Subtitle file matching the Short's caption lines (for uploading captions separately)."""
+    chunks = chunk_words(words, max(3, cap.get("chunk", 3)), max(24, cap.get("maxchars", 18)))
+    lines = []
+    for i, ch in enumerate(chunks, 1):
+        lines.append(f"{i}\n{_srt_time(ch[0]['s'])} --> {_srt_time(ch[-1]['e'] + 0.15)}\n"
+                     + " ".join(w["w"] for w in ch).strip() + "\n")
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def projects_base_parts(c: dict) -> list:

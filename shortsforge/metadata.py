@@ -10,7 +10,7 @@ from typing import Callable, Optional
 
 from .highlights import STOP as _HL_STOP
 
-Log =Optional[Callable[[str], None]]
+Log = Optional[Callable[[str], None]]
 
 STOP = set("""a an the and or but if so to of in on at for with from by is are was were be been being it this that
 these those i you he she we they me him her us them my your our their not no yes do does did have has had just very

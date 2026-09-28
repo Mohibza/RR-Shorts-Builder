@@ -29,11 +29,26 @@ const GRADE_CSS: Record<string, string> = {
   bw: "grayscale(1) contrast(1.28) brightness(1.02)", vintage: "sepia(.35) contrast(.95) saturate(.9)",
   moody: "brightness(.93) contrast(1.16) saturate(.85)", hdr: "saturate(1.25) contrast(1.1)",
   dream: "brightness(1.05) saturate(1.1) contrast(.96)",
+  teal: "hue-rotate(-8deg) saturate(1.1) contrast(1.05)", golden: "sepia(.25) saturate(1.2) brightness(1.03)",
+  matte: "contrast(.88) saturate(.9) brightness(1.04)", cyberpunk: "hue-rotate(-20deg) saturate(1.35) contrast(1.1)",
+  noir: "grayscale(1) contrast(1.45) brightness(.97)", sepia: "sepia(.9) contrast(1.05)", pastel: "saturate(.75) brightness(1.06) contrast(.92)",
+  night: "hue-rotate(15deg) brightness(.9) saturate(.85) contrast(1.1)", sunrise: "sepia(.15) saturate(1.25) brightness(1.02)",
+  punchy: "saturate(1.5) contrast(1.15)", faded: "contrast(.82) saturate(.8) brightness(1.05)", emerald: "hue-rotate(-12deg) saturate(1.15)",
 };
-const VIGNETTE = new Set(["cinematic", "vintage", "moody"]);
+const VIGNETTE = new Set(["cinematic", "vintage", "moody", "noir"]);
 const POS: Record<string, number> = { upper: 0.33, middle: 0.52, lower: 0.67 };
 
+let METRICS: Record<string, { w: Record<string, number>; other: number }> = {};
+export function setFontMetrics(m: typeof METRICS | undefined) { if (m) METRICS = m; }
+
 function fitSize(font: string, text: string, size: number, st: { pop?: boolean; emph?: string; bord?: number; hl_box?: string; box?: boolean }) {
+  const m = METRICS[font];
+  if (m) {                       // exact per-letter widths, same numbers the export uses
+    const grow = st.pop || st.emph ? 1.12 : 1;
+    const pad = 2 * ((st.bord || 6) + (st.hl_box ? 16 : 0) + (st.box ? st.bord || 0 : 0));
+    const unit = [...text].reduce((a, c) => a + (m.w[c] ?? m.other), 0) * grow;
+    return unit > 0 ? Math.min(size, (952 - pad) / unit) : size;
+  }
   const cw = CHAR_W[font] ?? 0.6;
   const grow = st.pop || st.emph ? 1.12 : 1;
   const pad = 2 * ((st.bord || 6) + (st.hl_box ? 16 : 0) + (st.box ? st.bord || 0 : 0));
@@ -48,6 +63,10 @@ function motionZoom(motion: string, T: number, D: number): [number, number, numb
     case "zoom_out": return [1.12 - 0.1 * T / d, 0, 0];
     case "ken_burns": { const z = 1.04 + 0.08 * T / d; return [z, (1 - 1 / z) / 2 * 0.6 * (T / d - 0.5) * 2, 0]; }
     case "breathe": return [1.035 + 0.025 * Math.sin(T * 2.2), 0, 0];
+    case "pan_left": return [1.1, -(1 - 1 / 1.1) / 2 * 0.9 * (2 * T / d - 1), 0];
+    case "pan_right": return [1.1, (1 - 1 / 1.1) / 2 * 0.9 * (2 * T / d - 1), 0];
+    case "drift_up": return [1.08, 0, -(1 - 1 / 1.08) / 2 * 0.9 * (2 * T / d - 1)];
+    case "zoom_pulse": return [1.04 + 0.03 * Math.pow(Math.abs(Math.sin(T * Math.PI)), 6), 0, 0];
     case "sway": return [1.08, (1 - 1 / 1.08) / 2 * 0.8 * Math.sin(T * 0.55), (1 - 1 / 1.08) / 2 * 0.6 * Math.sin(T * 0.37 + 1)];
     case "punch": return [1.02 + 0.06 * (Math.sin(T * 1.7) > 0.93 ? 1 : 0), 0, 0];
     default: return [1, 0, 0];
@@ -305,6 +324,7 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   let introEl: React.ReactNode = null;
   let shake = "";
   if (style.intro === "flash" && T < 0.3 && playing) introEl = <div className="intro" style={{ background: "#fff", opacity: 1 - T / 0.3 }} />;
+  if (style.intro === "fade_white" && T < 0.7 && playing) introEl = <div className="intro" style={{ background: "#fff", opacity: 1 - T / 0.7 }} />;
   if (style.intro === "fade_black" && T < 0.5 && playing) introEl = <div className="intro" style={{ background: "#000", opacity: 1 - T / 0.5 }} />;
   if (style.intro === "shake" && T < 0.45) shake = `translate(${16 * k * Math.sin(T * 95)}px, ${12 * k * Math.cos(T * 83)}px)`;
 
