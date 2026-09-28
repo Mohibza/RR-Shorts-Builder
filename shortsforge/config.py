@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from . import DATA_NAME, LEGACY_DATA_NAMES
+from .secure import seal, unseal
 
 
 def app_root() -> Path:
@@ -119,6 +120,12 @@ except OSError:
     pass
 
 
+# the bold, phone-readable caption styles; Clean Minimal, Karaoke Sweep, Typewriter and Caption Card render
+# small (size 115-130) and read poorly on a phone, so "random" leaves them out unless the user adds them back
+DEFAULT_CAPTION_POOL = ("hormozi", "beast", "boxed", "neon", "oneword", "comic", "marker", "slide", "pill", "hollow")
+SECRET_FIELDS = ("gemini_api_key", "anthropic_api_key", "yt_client_secret", "fb_app_secret", "tt_client_secret")
+
+
 @dataclass
 class Settings:
     # Output
@@ -154,7 +161,7 @@ class Settings:
     color_grade: str = "random"
     motion: str = "random"
     intro: str = "random"
-    caption_pool: list = field(default_factory=list)   # styles used by "random" (empty = all)
+    caption_pool: list = field(default_factory=lambda: list(DEFAULT_CAPTION_POOL))  # used by "random" (empty = all)
     hook_pool: list = field(default_factory=list)
     hook_title: bool = True
     cta_text: str = "Follow for more"
@@ -227,7 +234,7 @@ class Settings:
                 names = {f.name for f in fields(cls)}
                 for k, v in data.items():
                     if k in names:
-                        setattr(s, k, v)
+                        setattr(s, k, unseal(v) if k in SECRET_FIELDS else v)
                 ver = int(data.get("settings_version", 1))
                 if ver < 2:  # upgrade to the HD defaults
                     s.fps, s.quality_crf, s.source_quality = 0, 18, 1440
@@ -246,7 +253,12 @@ class Settings:
         return s
 
     def save(self) -> None:
-        SETTINGS_FILE.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        data = asdict(self)
+        for k in SECRET_FIELDS:        # API keys / app secrets are encrypted at rest (Windows DPAPI)
+            data[k] = seal(data.get(k) or "")
+        tmp = SETTINGS_FILE.with_suffix(".tmp")   # write + rename: a crash mid-save can't wipe the settings
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, SETTINGS_FILE)
 
     def copy(self) -> "Settings":
         return Settings(**json.loads(json.dumps(asdict(self))))

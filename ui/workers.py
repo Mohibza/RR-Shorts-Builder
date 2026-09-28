@@ -80,7 +80,8 @@ class QueueWorker(QThread):
                     cancel=ev,
                 )
                 res = p.process(item)
-                self.job_state.emit(job_id, "done", f"{len(res)} Shorts ready · {settings.output_dir}")
+                bad = f" · {len(p.failed)} failed (see log)" if p.failed else ""
+                self.job_state.emit(job_id, "done", f"{len(res)} Shorts ready{bad} · {settings.output_dir}")
             except Cancelled:
                 self.job_state.emit(job_id, "cancelled", "Cancelled")
                 self.log.emit(f"✖ Cancelled: {item.title}")
@@ -92,6 +93,7 @@ class QueueWorker(QThread):
             except Exception as e:
                 msg = str(e).strip().split("\n")[0][:300]
                 self.log.emit(f"✖ {item.title}: {e}\n{traceback.format_exc(limit=3)}")
+                joblog.write(f"✖ JOB FAILED {item.title} ({item.source}): {e}\n{traceback.format_exc()}")
                 self.job_state.emit(job_id, "failed", msg)
 
 
@@ -110,6 +112,7 @@ class RestyleWorker(QThread):
             r = p.restyle(self.plan_file, self.choice, self.hook, self.progress.emit)
             self.done.emit(asdict(r))
         except Exception as e:
+            joblog.write(f"✖ RE-RENDER FAILED {self.plan_file}: {e}\n{traceback.format_exc()}")
             self.failed.emit(str(e).split("\n")[0][:400])
 
 

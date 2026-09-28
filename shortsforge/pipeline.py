@@ -27,8 +27,8 @@ from .romanize import romanize_text, romanize_transcript
 from .highlights import INTENSE, Clip, words_in_range
 from .renderer import RenderJob, preview_frame, render, thumbnail
 from . import metadata, music_sources
-from .transcriber import energy_curve, extract_audio, transcribe
-from .utils import Cancelled, probe, safe_name, set_ffmpeg_override
+from .transcriber import ModelDownloadError, energy_curve, extract_audio, transcribe
+from .utils import Cancelled, check_free_space, probe, safe_name, set_ffmpeg_override
 
 PLAN_SUFFIX = ".sf.json"
 WORK = CACHE_DIR / "work"
@@ -200,10 +200,11 @@ class Pipeline:
                  on_short: Callable[[ShortResult], None] = lambda r: None,
                  cancel: Optional[threading.Event] = None):
         self.s = settings
-        self.log = log
+        self.log = lambda m: (joblog.write(m), log(m))   # the UI panel + the persistent jobs.log
         self.progress = progress
         self.on_short = on_short
         self.cancel = cancel or threading.Event()
+        self.failed: list[tuple[int, str]] = []   # (Short number, error) of Shorts that couldn't be rendered
         set_ffmpeg_override(settings.ffmpeg_path)
 
     def _check(self):
@@ -214,6 +215,7 @@ class Pipeline:
         """Steps shared by the classic run and the new project flow: source, transcript, best moments, SEO."""
         s = self.s
         P = self.progress
+        self.failed = []
         self.log(f"▶ {item.title}")
         fonts.fonts_dir()
 
@@ -268,8 +270,8 @@ class Pipeline:
                     lambda f, d: P("Transcribing speech", 0.30 + 0.35 * f, d), self.cancel, self.log,
                     on_stage=lambda st, f, d: P(st, 0.29 + 0.01 * f, d),
                     caption_lang=getattr(s, "caption_lang", "auto"))
-            except Cancelled:
-                raise
+            except (Cancelled, ModelDownloadError):
+                raise  # no speech model = no captions and blind picks: stop with a clear message instead
             except Exception as e:
                 self.log(f"Transcription failed ({e}). Falling back to audio-energy highlights without captions.")
         import numpy as np

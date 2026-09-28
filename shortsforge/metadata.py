@@ -8,7 +8,9 @@ from __future__ import annotations
 import re
 from typing import Callable, Optional
 
-Log = Optional[Callable[[str], None]]
+from .highlights import STOP as _HL_STOP
+
+Log =Optional[Callable[[str], None]]
 
 STOP = set("""a an the and or but if so to of in on at for with from by is are was were be been being it this that
 these those i you he she we they me him her us them my your our their not no yes do does did have has had just very
@@ -28,14 +30,32 @@ def _hashtag(t: str) -> str:
     return "#" + re.sub(r"[^\w]", "", str(t)).lower()
 
 
+# spoken filler that says nothing about the topic (apostrophes are stripped before the check: "that's" -> thats)
+FILLER = set("""thats dont doesnt didnt isnt wasnt arent werent cant couldnt wouldnt shouldnt wont im ive ill id youre
+youve youll youd hes shes theyre theyve weve were lets whats heres theres its think thought like well even still
+much many something anything everything nothing someone anyone everyone somebody said says say saying tell tells
+told went come came comes make made makes want wanted see saw seen look looked back now first every being guess
+maybe probably sure okay yeah yes gonna wanna gotta kinda sorta stuff whatever pretty little bit way ever never
+always whole another around through after before because while since though although where when then than just
+happened happens eventually albeit completely basically needs point
+kyunki matlab acha accha theek thik haan""".split())
+
+
+def _is_topic(w: str) -> bool:
+    """A tag candidate that tells a viewer (or search) what the Short is about."""
+    k = re.sub(r"[^\w]", "", w.lower())
+    return (len(k) > 3 and k not in STOP and k not in FILLER and k not in _HL_STOP
+            and not re.fullmatch(r"\d+(st|nd|rd|th|s)?", k))
+
+
 def _words(text: str) -> list[str]:
-    return [w for w in re.findall(r"[\w']+", text.lower()) if len(w) > 3 and w not in STOP]
+    return [w for w in re.findall(r"[\w']+", text.lower()) if _is_topic(w)]
 
 
 def offline(clip, video_title: str, source: str) -> dict:
     """Good metadata without AI: hook as title, first lines as description, keyword tags."""
     title = (clip.title or clip.hook or clip.text[:80]).strip().rstrip(".")
-    kw = [k for k in (clip.keywords or []) if k]
+    kw = [k for k in (clip.keywords or []) if k and all(_is_topic(p) for p in str(k).split())]
     freq: dict[str, int] = {}
     for w in _words(clip.text):
         freq[w] = freq.get(w, 0) + 1

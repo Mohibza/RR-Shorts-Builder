@@ -134,6 +134,47 @@ def probe(path: str) -> dict:
     return {"duration": dur, "width": w, "height": h, "fps": fps, "has_audio": "Audio:" in txt}
 
 
+_FFMPEG_NOISE = ("Loading font file", "Using font provider", "Added subtitle file", "fontselect:", "Glyph 0x")
+
+
+class NotEnoughSpace(RuntimeError):
+    pass
+
+
+def check_free_space(folder, need_bytes: float, what: str) -> None:
+    """Fail early with a clear message instead of a half-written file and a cryptic FFmpeg error."""
+    p = Path(folder)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        free = shutil.disk_usage(p).free
+    except OSError:
+        return
+    if free < need_bytes:
+        drive = p.anchor or str(p)
+        raise NotEnoughSpace(f"Not enough free disk space on {drive} for {what}: needs about "
+                             f"{need_bytes / 1e9:.1f} GB, only {free / 1e9:.1f} GB free. Free up space "
+                             f"(Settings → Clear download cache) or choose an output folder on another drive.")
+
+
+MAX_CMDLINE = 30000   # Windows refuses command lines over 32767 characters (WinError 206)
+
+
+@lru_cache(maxsize=1)
+def _graph_file_option() -> str:
+    """Option that reads -filter_complex from a file: '-/filter_complex' (FFmpeg 7+, the old one is gone in 8)
+    or '-filter_complex_script' (FFmpeg 6 and older)."""
+    try:
+        out = subprocess.run([find_ffmpeg(), "-version"], capture_output=True, text=True, timeout=20,
+                             creationflags=NO_WINDOW).stdout
+        m = re.search(r"ffmpeg version n?(\d+)\.", out)
+        if m and int(m[1]) < 7:
+            return "-filter_complex_script"
+    except Exception:
+        pass
+    return "-/filter_complex"   # current releases and git builds ("N-12345-...")
+
+
 def run_ffmpeg(
     args: list[str],
     duration: float,
@@ -141,7 +182,28 @@ def run_ffmpeg(
     cancel: Optional[threading.Event] = None,
     cwd: Optional[str] = None,
 ) -> None:
-    """Run ffmpeg with args (without the binary), reporting progress 0..1."""
+    """Run ffmpeg with args (without the binary), reporting progress 0..1.
+
+    A filter graph too long for the command line (long Shorts with many camera moves) is passed as a file."""
+    graph_file = None
+    if "-filter_complex" in args and len(subprocess.list2cmdline(args)) > MAX_CMDLINE:
+        import tempfile
+        i = args.index("-filter_complex")
+        fd, graph_file = tempfile.mkstemp(prefix="rrshorts_graph_", suffix=".txt")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(args[i + 1])
+        args = args[:i] + [_graph_file_option(), graph_file] + args[i + 2:]
+    try:
+        _run_ffmpeg(args, duration, on_progress, cancel, cwd)
+    finally:
+        if graph_file:
+            try:
+                os.unlink(graph_file)
+            except OSError:
+                pass
+
+
+def _run_ffmpeg(args: list[str], duration: float, on_progress, cancel, cwd) -> None:
     cmd = [find_ffmpeg(), "-hide_banner", "-nostdin", "-y", "-progress", "pipe:1", "-nostats"] + args
     proc = subprocess.Popen(
         cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -176,7 +238,12 @@ def run_ffmpeg(
     if cancel is not None and cancel.is_set():
         raise Cancelled()
     if proc.returncode != 0:
-        tail = "".join(err_lines[-25:])
+        # libass lists every font it loads; drop that noise so the real error stays in view
+        useful = [ln for ln in err_lines if not any(k in ln for k in _FFMPEG_NOISE)]
+        tail = "".join(useful[-25:])
+        from . import joblog
+        joblog.write(f"FFmpeg failed (code {proc.returncode})\nCOMMAND: {subprocess.list2cmdline(cmd)}\n"
+                     f"CWD: {cwd}\nSTDERR:\n{''.join(err_lines[-200:])}")
         raise RuntimeError(f"FFmpeg failed (code {proc.returncode}):\n{tail}")
     if on_progress:
         on_progress(1.0)
