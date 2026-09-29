@@ -22,6 +22,18 @@ import traceback
 import urllib.parse
 from dataclasses import asdict, fields
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class _QuietServer(ThreadingHTTPServer):
+    """The preview player cancels video range requests all the time (seeking): that's normal, don't log it."""
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        import sys
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -155,7 +167,19 @@ def catalog() -> dict:
         "music_sources": {k: {"name": v[0], "note": v[2]} for k, v in BROWSER_SOURCES.items()},
         "platforms": PLATFORMS,
         "packs": STYLE_PACKS,
+        "vibes": _vibes(),
+        "sfx_packs": _sfx_packs(),
     }
+
+
+def _vibes() -> dict:
+    from .vibe import catalog as vc
+    return vc()
+
+
+def _sfx_packs() -> dict:
+    from .sfx import PACK_NAMES
+    return PACK_NAMES
 
 
 def _export_presets() -> dict:
@@ -171,6 +195,8 @@ def _font_metrics() -> dict:
 
 # One-tap looks for the Create page (each is a full style choice)
 STYLE_PACKS = {
+    "vibe": {"name": "Auto Vibe", "desc": "Zooms, opening, colour, music & sounds matched to each clip",
+             "set": {"color_grade": "auto", "motion": "auto", "intro": "auto", "layout": "auto"}},
     "viral": {"name": "Viral Bold", "desc": "Big yellow word pop, punch zooms",
               "set": {"caption_style": "hormozi", "hook_style": "yellow_impact", "color_grade": "vibrant",
                       "motion": "punch", "intro": "flash", "layout": "auto"}},
@@ -193,8 +219,8 @@ STYLE_PACKS = {
             "set": {"caption_style": "karaoke", "hook_style": "headline", "color_grade": "cinematic",
                     "motion": "none", "intro": "fade_black", "layout": "two_speakers"}},
     "mix": {"name": "Mix it up", "desc": "Every Short gets a different look",
-            "set": {"caption_style": "random", "hook_style": "random", "color_grade": "random",
-                    "motion": "random", "intro": "random", "layout": "auto"}},
+            "set": {"caption_style": "random", "hook_style": "random", "color_grade": "auto",
+                    "motion": "auto", "intro": "auto", "layout": "auto"}},
 }
 
 
@@ -203,7 +229,7 @@ class App:
     def __init__(self, engine: Optional[Engine] = None, port: int = 0):
         self.engine = engine or Engine()
         self.token = secrets.token_urlsafe(24)
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(self))
+        self.httpd = _QuietServer(("127.0.0.1", port), _make_handler(self))
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
 
@@ -509,6 +535,15 @@ def _make_handler(app: App):
             p, str(a["clip"]), a.get("edits") or {}, float(a.get("t", 1.0)), str(out))
         return {"path": png, "duration": D}
 
+    def _music_sig(st) -> str:
+        from . import music_index
+        from .config import usable_music_dir
+        try:
+            ps = music_index.tracks_in([st.music_dir, str(usable_music_dir(st.music_dir)[0])])
+            return f"{len(ps)}:{max((int(p.stat().st_mtime) for p in ps), default=0)}"
+        except Exception:
+            return ""
+
     def clip_audio(a):
         import hashlib
         from .pipeline import Pipeline
@@ -518,16 +553,28 @@ def _make_handler(app: App):
         edits = a.get("edits") or {}
         st = Settings.load()
         key = hashlib.md5(json.dumps([p["id"], a["clip"], edits, st.sfx_level, st.add_music, st.music_mode,
-                                      st.music_selected, st.cta_text, time.strftime("%Y%m%d")],
+                                      st.music_selected, st.cta_text, st.sfx_pack, st.music_match, st.zoom_strength,
+                                      st.motion, st.intro, st.color_grade, 6, _music_sig(st)],
                                      sort_keys=True, default=str).encode()).hexdigest()[:14]
         out = FRAMES / f"aud_{key}.ogg"
-        if out.exists():
-            return {"path": str(out)}
+        side = FRAMES / f"aud_{key}.json"
+        if side.exists():
+            try:
+                cached = json.loads(side.read_text(encoding="utf-8"))
+                if not cached.get("path") or Path(cached["path"]).exists():
+                    return cached
+            except Exception:
+                pass
         for old in FRAMES.glob("aud_*.*"):
             if time.time() - old.stat().st_mtime > 3600:
                 old.unlink(missing_ok=True)
-        path, D = Pipeline(st, log=lambda m: None).preview_audio(p, str(a["clip"]), edits, str(out))
-        return {"path": path, "duration": D}
+        path, D, plan = Pipeline(st, log=lambda m: None).preview_audio(p, str(a["clip"]), edits, str(out))
+        res = {"path": path, "duration": D, "plan": plan}
+        try:
+            side.write_text(json.dumps(res), encoding="utf-8")
+        except OSError:
+            pass
+        return res
 
     def clip_proxy(a):
         from .pipeline import make_proxy
@@ -686,23 +733,34 @@ def _make_handler(app: App):
 
     # ---- music
     def music_list(_a):
-        from . import music_sources
-        from .pipeline import MUSIC_EXT
+        from . import music_index, music_sources
         s = Settings.load()
         folder = music_folder()
-        s = Settings.load()
+        trending = folder / "Trending"
+        try:
+            trending.mkdir(exist_ok=True)
+        except OSError:
+            pass
         meta = music_sources.load_meta(str(folder))
+        tmeta = music_sources.load_meta(str(trending)) if trending.exists() else {}
         starred = set(s.music_selected or [])
+        try:
+            feel = {d["name"]: d for d in music_index.describe([str(folder)])}
+        except Exception:
+            feel = {}
         out = []
-        for f in sorted(folder.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-            if f.suffix.lower() in MUSIC_EXT:
-                m = meta.get(f.name) or {}
-                out.append({"name": f.name, "path": str(f), "title": m.get("title") or f.stem,
-                            "artist": m.get("artist", ""), "license": m.get("license", ""),
-                            "source": m.get("source", ""), "credit": m.get("credit", ""),
-                            "starred": f.name in starred, "size": f.stat().st_size})
-        return {"folder": str(folder), "tracks": out, "mode": s.music_mode, "add_music": s.add_music,
-                "volume": s.music_volume, "auto": s.music_auto}
+        files = [f for f in music_index.tracks_in([str(folder)])]
+        for f in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True):
+            m = (tmeta if f.parent == trending else meta).get(f.name) or {}
+            fe = feel.get(f.name) or {}
+            out.append({"name": f.name, "path": str(f), "title": m.get("title") or f.stem,
+                        "artist": m.get("artist", ""), "license": m.get("license", ""),
+                        "source": m.get("source", ""), "credit": m.get("credit", ""),
+                        "starred": f.name in starred, "size": f.stat().st_size,
+                        "trending": f.parent == trending, "vibes": fe.get("vibes", []), "bpm": fe.get("bpm")})
+        return {"folder": str(folder), "trending_folder": str(trending), "tracks": out, "mode": s.music_mode,
+                "add_music": s.add_music, "volume": s.music_volume, "auto": s.music_auto,
+                "match": getattr(s, "music_match", True)}
 
     def music_search(a):
         from . import music_sources
@@ -767,8 +825,12 @@ def _make_handler(app: App):
         return True
 
     def music_remove(a):
-        s = Settings.load()
-        f = music_folder() / Path(str(a["name"])).name
+        base = music_folder()
+        f = base / Path(str(a["name"])).name
+        if a.get("path"):
+            cand = Path(str(a["path"])).resolve()
+            if cand.parent in (base.resolve(), (base / "Trending").resolve()):
+                f = cand
         f.unlink(missing_ok=True)
         _star(f.name, False)
         return True
@@ -803,6 +865,9 @@ def _make_handler(app: App):
 
     # ---- settings
     def save_settings(patch: dict):
+        if any(k.endswith("_api_key") for k in (patch or {})):
+            from . import llm
+            llm._DEAD.clear()          # a new key gets a fresh chance
         s = Settings.load()
         names = {f.name for f in fields(Settings)}
         for k, v in (patch or {}).items():
@@ -874,9 +939,10 @@ def _make_handler(app: App):
     def license_info(_a):
         from . import licensing
         st = licensing.current_state()
-        return {"enabled": licensing.enabled(), "status": st.status, "left": st.videos_left if st.status != "active"
-                else None, "allowed": st.videos_allowed, "used": st.videos_used, "plan": st.plan,
-                "expires_at": st.expires_at, "fingerprint": st.fingerprint}
+        return {"enabled": licensing.enabled(), "status": st.status, "used": st.videos_used,
+                "allowed": st.videos_allowed, "left": None if st.status == "active" else st.videos_left,
+                "plan": st.plan, "expires_at": st.expires_at, "device_id": st.device_id, "message": st.message,
+                "keys_ready": bool(licensing._public_key())}
 
     def license_activate(a):
         from . import licensing
@@ -884,6 +950,7 @@ def _make_handler(app: App):
             licensing.redeem(str(a.get("key", "")).strip())
         except licensing.LicenseError as e:
             raise ApiError(str(e))
+        E.bus.emit("status", E.status())
         return license_info({})
 
     def focus(_a):

@@ -45,11 +45,17 @@ MOTIONS: dict[str, str] = {
 
 INTROS: dict[str, str] = {
     "none": "None",
+    "zoom_slam": "Zoom Slam (starts close, snaps back)",
+    "punch_in": "Punch In",
+    "whip": "Whip Pan",
+    "rgb_glitch": "RGB Glitch",
+    "shake": "Impact Shake",
     "flash": "White Flash",
     "fade_black": "Fade From Black",
-    "shake": "Impact Shake",
     "fade_white": "Fade From White",
 }
+
+FOCUS_RISE, FOCUS_HOLD, FOCUS_FALL = 0.16, 1.35, 0.35
 
 LAYOUTS: dict[str, str] = {
     "auto": "Auto (face → smart crop, else blur fit)",
@@ -71,56 +77,112 @@ CAMERA_LAYOUTS = ("auto", "smart_crop", "split", "split_reverse", "zoom45", "squ
 CROP_LAYOUTS = ("smart_crop", "center_crop", "split", "split_reverse", "two_speakers", "zoom45", "square")
 
 
-def motion_filters(motion: str, dur: float, punch_times: list[float], intro: str, fps: int = 30) -> str | None:
-    """Sub-pixel smooth camera motion as a `perspective` filter (fixed output size, no jitter).
+def focus_windows(punches: list, dur: float) -> list[tuple[float, float, float]]:
+    """Punch/focus zooms as (start, end, amount): zoom in fast on the word, hold, ease back out before the next.
+    The live preview (web/src/lib/fx.ts) uses exactly the same numbers."""
+    norm = [(p, 0.12) if isinstance(p, (int, float)) else (p[0], p[1]) for p in punches or []]
+    pts = sorted((float(t), float(a)) for t, a in norm if 0.3 <= float(t) < dur - 0.4)
+    out = []
+    for i, (t, amt) in enumerate(pts):
+        nxt = pts[i + 1][0] if i + 1 < len(pts) else dur
+        end = min(t + FOCUS_RISE + FOCUS_HOLD, nxt - 0.05, dur)
+        if end - t >= 0.3:
+            out.append((round(t, 3), round(end, 3), round(amt, 4)))
+    return out[:40]
 
-    The zoom factor z(t) picks a window of size W/z x H/z (plus an offset) in the frame and stretches it to
-    the full frame with cubic interpolation, so zooms glide instead of stepping in whole pixels."""
+
+def _smooth(x: str) -> str:
+    return f"(({x})*({x})*(3-2*({x})))"
+
+
+def motion_exprs(motion: str, dur: float, punches: list, intro: str, fps: int = 30, at: float | None = None):
+    """(z, dx, dy) as FFmpeg expressions of t. dx/dy are fractions of the frame width/height.
+    `at` = evaluate for one fixed time (exact-frame stills)."""
     D = max(dur, 0.1)
-    t = f"(in/{fps})"
+    t = f"(in/{fps})" if at is None else f"({at:.4f})"
     dx = dy = "0"
+    z = "1"
     if motion == "slow_zoom":
         z = f"(1+0.10*{t}/{D:.2f})"
     elif motion == "zoom_out":
         z = f"(1.12-0.10*{t}/{D:.2f})"
     elif motion == "ken_burns":
         z = f"(1.04+0.08*{t}/{D:.2f})"
-        dx = f"(W-W/{z})/2*0.6*({t}/{D:.2f}-0.5)*2"
-    elif motion == "punch":
-        pts = [p for p in punch_times if 0.5 < p < D - 0.5][:16]
-        if not pts:
-            pts = [D * k / 6 for k in range(1, 6)]
-        terms = []
-        for i, p in enumerate(pts):
-            nxt = pts[i + 1] if i + 1 < len(pts) else D
-            if i % 2 == 0:  # zoom in on this key word, ease back out at the next one
-                terms.append(f"clip(({t}-{p:.2f})/0.14,0,1)*clip(({nxt:.2f}-{t})/0.2,0,1)")
-        z = "(1.02+0.12*(" + ("+".join(terms) or "0") + "))"
+        dx = f"(1-1/{z})/2*0.6*({t}/{D:.2f}-0.5)*2"
     elif motion == "breathe":
         z = f"(1.035+0.025*sin({t}*2.2))"
     elif motion in ("pan_left", "pan_right"):
         z = "1.1"
         sgn = -1 if motion == "pan_left" else 1
-        dx = f"{sgn}*(W-W/1.1)/2*0.9*(2*{t}/{D:.2f}-1)"
+        dx = f"{sgn}*(1-1/1.1)/2*0.9*(2*{t}/{D:.2f}-1)"
     elif motion == "drift_up":
         z = "1.08"
-        dy = f"-(H-H/1.08)/2*0.9*(2*{t}/{D:.2f}-1)"
+        dy = f"-(1-1/1.08)/2*0.9*(2*{t}/{D:.2f}-1)"
     elif motion == "zoom_pulse":
         z = f"(1.04+0.03*pow(abs(sin({t}*3.14159*1.0)),6))"
     elif motion == "sway":
         z = "1.08"
-        dx = f"(W-W/1.08)/2*0.8*sin({t}*0.55)"
-        dy = f"(H-H/1.08)/2*0.6*sin({t}*0.37+1)"
-    else:
-        if intro != "shake":
-            return None
-        z = "1.05"
-    if intro == "shake":
-        dx = f"({dx})+16*sin({t}*95)*lt({t},0.45)"
-        dy = f"({dy})+12*cos({t}*83)*lt({t},0.45)"
-    x0 = f"(W-W/{z})/2+{dx}"
-    x1 = f"(W+W/{z})/2+{dx}"
-    y0 = f"(H-H/{z})/2+{dy}"
-    y1 = f"(H+H/{z})/2+{dy}"
+        dx = f"(1-1/1.08)/2*0.8*sin({t}*0.55)"
+        dy = f"(1-1/1.08)/2*0.6*sin({t}*0.37+1)"
+    terms = []
+    for a, e, amt in focus_windows(punches, D):
+        r = _smooth(f"clip(({t}-{a:.3f})/{FOCUS_RISE},0,1)")
+        f = _smooth(f"clip(({e:.3f}-{t})/{FOCUS_FALL},0,1)")
+        terms.append(f"{amt:.4f}*min({r},{f})")
+    extra = list(terms)
+    if intro == "zoom_slam":
+        extra.append(f"0.38*(1-{_smooth(f'clip({t}/0.42,0,1)')})")
+    elif intro == "punch_in":
+        extra.append(f"0.13*min(clip({t}/0.1,0,1),{_smooth(f'clip((0.62-{t})/0.5,0,1)')})")
+    elif intro == "whip":
+        extra.append(f"0.22*(1-{_smooth(f'clip({t}/0.32,0,1)')})")
+        dx = f"({dx})+0.085*(1-{_smooth(f'clip({t}/0.32,0,1)')})"
+    elif intro == "rgb_glitch":
+        extra.append("0.06*lt(" + t + ",0.5)")
+        dx = f"({dx})+0.009*sin({t}*170)*lt({t},0.5)"
+    elif intro == "shake":
+        extra.append("0.05*lt(" + t + ",0.45)")
+        dx = f"({dx})+0.0148*sin({t}*95)*lt({t},0.45)"
+        dy = f"({dy})+0.00625*cos({t}*83)*lt({t},0.45)"
+    if extra:
+        z = f"({z})*(1+" + "+".join(extra) + ")"
+    if z == "1" and dx == "0" and dy == "0":
+        return None
+    return z, dx, dy
+
+
+def motion_filters(motion: str, dur: float, punches: list, intro: str, fps: int = 30,
+                   at: float | None = None) -> str | None:
+    """Sub-pixel smooth camera motion as a `perspective` filter (fixed output size, no jitter).
+
+    The zoom factor z(t) picks a window of size W/z x H/z (plus an offset) in the frame and stretches it to
+    the full frame with cubic interpolation, so zooms glide instead of stepping in whole pixels. The window
+    is kept inside the frame (offsets are clamped), so no edges ever show. Works at any resolution, so the
+    renderer runs it on the small source crop before upscaling (much faster)."""
+    ex = motion_exprs(motion, dur, punches, intro, fps, at)
+    if not ex:
+        return None
+    z, dx, dy = ex
+    hx = f"(W-W/({z}))/2"
+    hy = f"(H-H/({z}))/2"
+    ox = f"max(-{hx},min({hx},({dx})*W))"
+    oy = f"max(-{hy},min({hy},({dy})*H))"
+    x0, x1 = f"{hx}+{ox}", f"W-{hx}+{ox}"
+    y0, y1 = f"{hy}+{oy}", f"H-{hy}+{oy}"
     return (f"perspective=x0='{x0}':y0='{y0}':x1='{x1}':y1='{y0}':x2='{x0}':y2='{y1}':x3='{x1}':y3='{y1}'"
-            f":interpolation=cubic:eval=frame")
+            f":interpolation=cubic:eval={'frame' if at is None else 'init'}")
+
+
+def intro_overlay(intro: str) -> str | None:
+    """Colour/flash part of an opening (runs after captions)."""
+    if intro == "flash":
+        return "fade=t=in:st=0:d=0.35:color=white"
+    if intro == "fade_white":
+        return "fade=t=in:st=0:d=0.7:color=white"
+    if intro == "fade_black":
+        return "fade=t=in:st=0:d=0.4"
+    if intro == "rgb_glitch":
+        return "rgbashift=rh=-14:bh=14:gv=4:enable='lt(t,0.5)*lt(mod(t,0.14),0.08)'"
+    if intro == "zoom_slam":
+        return "fade=t=in:st=0:d=0.12:color=white"
+    return None

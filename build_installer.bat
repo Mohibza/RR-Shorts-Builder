@@ -86,7 +86,7 @@ echo [6/6] Building the installer...
 
 echo.
 echo  ===========================================================
-echo    DONE:  installer_output\Rebels-Revolt-Shorts-Setup-2.2.0.exe
+echo    DONE:  installer_output\Rebels-Revolt-Shorts-Setup-2.3.0.exe
 echo    Send that one file to your friend.
 echo  ===========================================================
 explorer "installer_output"

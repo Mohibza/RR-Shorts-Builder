@@ -59,6 +59,12 @@ function StatusPill() {
         <span className={st.yt_login ? "ok" : "warn"}>YouTube</span>·
         <span className={st.ai !== "offline" ? "ok" : "muted"}>{st.ai === "offline" ? "Offline AI" : st.ai === "gemini" ? "Gemini" : st.ai === "openai" ? "ChatGPT" : "Claude"}</span>
       </div>
+      {st.trial && (
+        <button className={`ss-row sub trial ${st.trial.status === "active" ? "ok" : (st.trial.left ?? 0) > 0 ? "" : "bad"}`} onClick={() => go("settings", { settingsSec: "license" })}>
+          <Icon name="key" size={12} /> {st.trial.status === "active" ? `${st.trial.plan} plan${st.trial.expires_at ? ` · until ${new Date(st.trial.expires_at * 1000).toLocaleDateString()}` : ""}`
+            : (st.trial.left ?? 0) > 0 ? `Free trial: ${st.trial.left} Short${st.trial.left === 1 ? "" : "s"} left` : "Trial over · enter your key"}
+        </button>
+      )}
       {(st.watching > 0 || st.uploads_waiting > 0) && (
         <div className="ss-row sub auto"><Icon name="zap" size={12} /> Autopilot: {[st.watching ? `${st.watching} channel${st.watching > 1 ? "s" : ""}` : "", st.uploads_waiting ? `${st.uploads_waiting} upload${st.uploads_waiting > 1 ? "s" : ""} queued` : ""].filter(Boolean).join(", ")}</div>
       )}

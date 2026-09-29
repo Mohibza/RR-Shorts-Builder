@@ -187,15 +187,24 @@ class AI:
         self.provider, self.key, self.model, self.log = provider, (key or "").strip(), model, log
 
     @classmethod
-    def from_settings(cls, s, log=None) -> Optional["AI"]:
+    def from_settings(cls, s, log=None):
+        """The chosen AI editor, backed up by any other AI key you've entered: if the chosen one fails
+        (invalid key, no credit, down), the next one is tried before falling back to the offline editor."""
         p = getattr(s, "clip_picker", "local")
-        if p == "gemini" and getattr(s, "gemini_api_key", "").strip():
-            return cls("gemini", s.gemini_api_key, getattr(s, "gemini_model", "auto") or "auto", log)
-        if p == "claude" and getattr(s, "anthropic_api_key", "").strip():
-            return cls("claude", s.anthropic_api_key, getattr(s, "claude_model", "claude-sonnet-5"), log)
-        if p == "openai" and getattr(s, "openai_api_key", "").strip():
-            return cls("openai", s.openai_api_key, getattr(s, "openai_model", "auto") or "auto", log)
-        return None
+        if p == "local":
+            return None
+        avail = []
+        if getattr(s, "gemini_api_key", "").strip():
+            avail.append(cls("gemini", s.gemini_api_key, getattr(s, "gemini_model", "auto") or "auto", log))
+        if getattr(s, "openai_api_key", "").strip():
+            avail.append(cls("openai", s.openai_api_key, getattr(s, "openai_model", "auto") or "auto", log))
+        if getattr(s, "anthropic_api_key", "").strip():
+            avail.append(cls("claude", s.anthropic_api_key, getattr(s, "claude_model", "claude-sonnet-5"), log))
+        avail.sort(key=lambda a: a.provider != p)
+        avail = [a for a in avail if a.provider not in _DEAD]
+        if not avail:
+            return None
+        return avail[0] if len(avail) == 1 else ChainAI(avail, log)
 
     @property
     def label(self) -> str:
@@ -214,6 +223,44 @@ class AI:
         if not m:
             raise LLMError("AI reply had no JSON")
         return json.loads(m.group(0))
+
+
+_DEAD: dict[str, float] = {}   # providers whose key was just rejected (skip them for this session)
+
+
+class ChainAI:
+    """Tries each AI in turn; a provider that rejects its key / has no credit is skipped from then on."""
+
+    def __init__(self, ais: list, log=None):
+        self.ais, self.log, self.cur = ais, log, ais[0]
+
+    @property
+    def label(self) -> str:
+        return self.cur.label
+
+    def _run(self, fn):
+        last = None
+        for a in list(self.ais):
+            if a.provider in _DEAD:
+                continue
+            self.cur = a
+            try:
+                return fn(a)
+            except Exception as e:
+                last = e
+                msg = str(e).lower()
+                if any(k in msg for k in ("api key", "401", "403", "credit", "quota", "billing", "permission", "invalid")):
+                    import time as _t
+                    _DEAD[a.provider] = _t.time()
+                if self.log:
+                    self.log(f"{a.label} unavailable ({str(e)[:120]}); trying the next AI…")
+        raise last or LLMError("no AI available")
+
+    def ask(self, prompt: str, json_mode: bool = True, timeout: int = 200) -> str:
+        return self._run(lambda a: a.ask(prompt, json_mode, timeout))
+
+    def ask_json(self, prompt: str, timeout: int = 200) -> dict:
+        return self._run(lambda a: a.ask_json(prompt, timeout))
 
 
 def test_key(provider: str, key: str, model: str = "auto") -> str:

@@ -310,9 +310,10 @@ rambling sentences inside a moment. Keep it natural, max 4 parts.
 - Optional "cold_open": the id of ONE short, gripping sentence from inside the Short to play first as a teaser.
 - Shorts must not overlap each other. Rank best first. Give each a "score" 1-10 for viral potential.
 - "title": a scroll-stopping hook for the on-screen heading, max 7 words, written in {title_lang}.
+- "vibe": the feel of that Short, one of: hype, motivational, emotional, funny, suspense, story, info, chill (it picks the music, sound effects and camera moves).
 
 Reply with JSON only:
-{{"shorts":[{{"title":"...","parts":[[first_id,last_id],...],"cold_open":null,"score":8,"why":"one line"}}]}}
+{{"shorts":[{{"title":"...","parts":[[first_id,last_id],...],"cold_open":null,"score":8,"why":"one line","vibe":"story"}}]}}
 
 Transcript:
 {lines}"""
@@ -373,7 +374,7 @@ def ai_director(transcript: dict, energy: np.ndarray, duration: float, n: int, m
             cold = None
         clip = _as_clip(sel, cold, words, float(sh.get("score", 5) or 5),
                         {"type": f"{ai.label} pick", "why": str(sh.get("why", ""))[:200], "cold_open": bool(cold),
-                         "ai_title": bool(sh.get("title"))})
+                         "ai_title": bool(sh.get("title")), "vibe": str(sh.get("vibe") or "").lower().strip()})
         if sh.get("title"):
             clip.title = str(sh["title"]).strip().strip('"')[:80]
         clips.append(clip)

@@ -17,7 +17,11 @@ export type Edits = {
   hook?: string;
   style?: Partial<Style>;
   place?: Place;
-  audio?: { music?: string; music_volume?: number | null; sfx_level?: string };
+  audio?: { music?: string; music_volume?: number | null; sfx_level?: string; sfx_pack?: string; music_mood?: string;
+    seed?: number; music_offset?: number | null };
+  zooms?: number[] | null;       // focus zoom moments (absolute source seconds); missing = automatic
+  zoom_mult?: number;            // focus zoom strength (1 = the vibe's default)
+  vibe?: string;                 // override the detected vibe
   meta?: { title?: string; description?: string; tags?: string[]; hashtags?: string[] };
 };
 
@@ -35,7 +39,7 @@ export type Clip = {
   seo: { title?: string; description?: string; tags?: string[]; hashtags?: string[] };
   media: { file: string; offset: number }; proxy?: { file: string; offset: number }; words?: Word[]; style: Style; poster: string;
   edits: Edits; exports: ExportRec[]; status: string; duration: number;
-  camera?: [number, number][]; framing?: string; coverage?: number;
+  camera?: [number, number][]; framing?: string; coverage?: number; vibe?: string; seed?: number;
 };
 
 export type Project = {
@@ -65,6 +69,7 @@ export type QueueJob = {
 export type Status = {
   version: string; ffmpeg: boolean; fonts_missing: number; yt_login: boolean; running: number; exporting: number;
   uploads_waiting: number; watching: number; auto_upload: boolean; ai: string; license: boolean;
+  trial?: { status: string; left: number | null; plan: string | null; expires_at: number | null } | null;
 };
 
 export type CapStyle = {
@@ -85,6 +90,8 @@ export type Catalog = {
   layouts: Record<string, string>; wm_positions: Record<string, string>; fonts: Record<string, string>;
   music_sources: Record<string, { name: string; note: string }>; platforms: Record<string, string>;
   packs: Record<string, { name: string; desc: string; set: Record<string, string> }>;
+  vibes?: Record<string, { name: string; music: string[]; pack: string }>;
+  sfx_packs?: Record<string, string>;
 };
 
 export type LibItem = {

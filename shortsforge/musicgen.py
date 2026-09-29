@@ -32,6 +32,16 @@ MOODS = {
                          swing=0.0, drums="big", keys="strings", lead="arp", crackle=False, cutoff=5000),
     "trap":         dict(name="Trap Beat", bpm=(136, 146), minor=True, prog=[[0, 5, 6, 4], [0, 0, 5, 6]],
                          swing=0.0, drums="trap", keys="pad", lead="bell", crackle=False, cutoff=5500),
+    "phonk":        dict(name="Phonk Drift", bpm=(128, 142), minor=True, prog=[[0, 0, 5, 6], [0, 6, 5, 4]],
+                         swing=0.0, drums="phonk", keys="pad", lead="cowbell", crackle=False, cutoff=6500),
+    "drill":        dict(name="Drill Beat", bpm=(138, 146), minor=True, prog=[[0, 5, 3, 4], [0, 3, 5, 6]],
+                         swing=0.0, drums="drill", keys="strings", lead="bell", crackle=False, cutoff=6000),
+    "emotional":    dict(name="Emotional Piano", bpm=(68, 80), minor=True, prog=[[0, 5, 2, 6], [5, 3, 0, 4]],
+                         swing=0.0, drums="none", keys="strings", lead="keys", crackle=False, cutoff=5000),
+    "cinematic":    dict(name="Cinematic Trailer", bpm=(86, 96), minor=True, prog=[[0, 5, 6, 4], [0, 3, 6, 5]],
+                         swing=0.0, drums="big", keys="strings", lead="brass", crackle=False, cutoff=5500),
+    "funk":         dict(name="Funky Groove", bpm=(104, 116), minor=False, prog=[[0, 3, 0, 4], [0, 5, 3, 4]],
+                         swing=0.06, drums="funk", keys="pluck", lead="bright", crackle=False, cutoff=8000),
     "dark":         dict(name="Dark Suspense", bpm=(70, 80), minor=True, prog=[[0, 1, 0, 6], [0, 5, 1, 0]],
                          swing=0.0, drums="soft", keys="strings", lead="bell", crackle=False, cutoff=2500),
 }
@@ -145,6 +155,15 @@ def note(freq: float, dur: float, kind: str, seed: int = 0) -> np.ndarray:
     elif kind == "sub808":
         f = freq * (1 + 0.5 * np.exp(-t * 40))
         y = np.tanh(np.sin(2 * np.pi * np.cumsum(f) / SR) * 2.0) * _env(n, 0.003, 1.5, 0.6, 0.15, dur)
+    elif kind == "cowbell":
+        y = sum(np.sign(np.sin(2 * np.pi * freq * r * t)) for r in (1.0, 1.44)) / 2
+        y = _lowpass(y, 3500) * np.exp(-t * 9) * _env(n, 0.002, 1, 1, 0.05, dur)
+    elif kind == "brass":
+        y = sum(2 * (((freq * (1 + d)) * t) % 1) - 1 for d in (-0.003, 0.004)) / 2
+        y = _lowpass(y, 1200) * _env(n, 0.12, 0.8, 0.8, 0.3, dur) * (1 + 0.04 * np.sin(2 * np.pi * 5 * t))
+    elif kind == "tom":
+        f = freq * (1 + 0.6 * np.exp(-t * 25))
+        y = np.sin(2 * np.pi * np.cumsum(f) / SR) * np.exp(-t * 7)
     else:  # pad
         y = sum(2 * (((freq * (1 + d)) * t) % 1) - 1 for d in (-0.006, 0, 0.007)) / 3
         y = _lowpass(y, 1400) * _env(n, 0.6, 1.5, 0.8, 0.8, dur)
@@ -168,6 +187,7 @@ def generate(mood: str, seconds: float = 90, seed: Optional[int] = None,
     swing = M["swing"]
     G = dict(GAINS)
     G["keys"] *= {"strings": 1.4, "pad": 1.5, "epiano": 1.0, "piano": 1.0, "pluck": 1.8}.get(M["keys"], 1.0)
+    urban = M["drums"] in ("trap", "phonk", "drill")
 
     def deg(d, octave=0):
         return root + scale[d % 7] + 12 * (d // 7 + octave)
@@ -180,7 +200,8 @@ def generate(mood: str, seconds: float = 90, seed: Optional[int] = None,
     motif = [(rnd.choice([0, 0.5, 1, 1.5, 2, 2.5, 3]), rnd.choice(pent)) for _ in range(rnd.randint(4, 6))]
     motif.sort()
 
-    kicks = {"lofi": [0, 2.5], "soft": [0, 2], "pop": [0, 1, 2, 3], "big": [0, 1.5, 2, 3.5], "trap": [0, 2.75]}[M["drums"]]
+    kicks = {"lofi": [0, 2.5], "soft": [0, 2], "pop": [0, 1, 2, 3], "big": [0, 1.5, 2, 3.5], "trap": [0, 2.75],
+             "phonk": [0, 1.75, 2.5], "drill": [0, 2.5, 3.25], "funk": [0, 0.75, 2.5], "none": []}[M["drums"]]
     for b in range(bars):
         t0 = b * bar
         section = "intro" if b < 2 else "outro" if b >= bars - 2 else ("break" if (b // 8) % 3 == 2 and b % 8 < 2 else "main")
@@ -191,23 +212,31 @@ def generate(mood: str, seconds: float = 90, seed: Optional[int] = None,
                     rnd.uniform(-0.4, 0.4))
         # bass
         if section != "intro":
-            bass_kind = "sub808" if M["drums"] == "trap" else "bass"
-            pattern = [0, 2.5] if M["drums"] in ("lofi", "trap") else [0, 1.5, 2, 3] if M["drums"] in ("pop", "big") else [0, 2]
-            for p in pattern:
-                mix.add(t0 + p * beat, note(_hz(deg(d) - 12), beat * (1.4 if len(pattern) <= 2 else 0.9), bass_kind), G["bass"])
+            bass_kind = "sub808" if urban else "bass"
+            pattern = ([0, 2.5] if M["drums"] in ("lofi", "trap", "drill") else [0, 1.75, 2.5] if M["drums"] == "phonk"
+                       else [0, 0.75, 1.5, 2, 2.75, 3.5] if M["drums"] == "funk"
+                       else [0, 1.5, 2, 3] if M["drums"] in ("pop", "big") else [0, 2])
+            for j, p in enumerate(pattern):
+                octv = 12 if (M["drums"] == "funk" and j % 2) else 0
+                mix.add(t0 + p * beat, note(_hz(deg(d) - 12 + octv),
+                                            beat * (1.4 if len(pattern) <= 3 else 0.5 if M["drums"] == "funk" else 0.9),
+                                            bass_kind), G["bass"])
         # drums
-        if section in ("main", "outro") or (section == "break" and M["drums"] == "trap"):
+        if M["drums"] != "none" and (section in ("main", "outro") or (section == "break" and urban)):
             for p in kicks:
                 if section == "break" and p > 0:
                     continue
-                mix.add(t0 + p * beat, kick(M["drums"] == "big", M["drums"] == "trap"), G["kick"])
-            for p in (1, 3):
-                s = clap(seed + b) if M["drums"] in ("pop", "trap") else snare(seed + b + p, M["drums"] in ("lofi", "soft"))
+                mix.add(t0 + p * beat, kick(M["drums"] == "big", urban), G["kick"])
+            for p in ((2,) if M["drums"] == "drill" else (1, 3)):
+                s = clap(seed + b) if M["drums"] in ("pop", "trap", "phonk", "funk") else snare(seed + b + p, M["drums"] in ("lofi", "soft"))
                 mix.add(t0 + p * beat + (0.02 if M["drums"] == "lofi" else 0), s, G["snare"] if M["drums"] != "soft" else G["snare"] * 0.65)
-            steps = 16 if M["drums"] == "trap" else 8
+            if M["drums"] == "big" and b % 2 == 1:           # trailer toms
+                for p, m in ((3, 45), (3.25, 43), (3.5, 40), (3.75, 38)):
+                    mix.add(t0 + p * beat, note(_hz(m), 0.3, "tom"), G["kick"] * 0.8, 0.2)
+            steps = 12 if M["drums"] == "drill" else 16 if urban or M["drums"] == "funk" else 8
             for i in range(steps):
                 sw = swing * beat / 2 if i % 2 else 0
-                if M["drums"] == "trap" and b % 2 == 1 and i >= 12:     # hi-hat rolls
+                if urban and b % 2 == 1 and i >= steps - 4:     # hi-hat rolls
                     for r in range(3):
                         mix.add(t0 + (i + r / 3) * bar / steps, hat(seed + i * 7 + r), G["hat"] * 0.8)
                     continue
@@ -215,8 +244,19 @@ def generate(mood: str, seconds: float = 90, seed: Optional[int] = None,
                         G["hat"] if i % 2 == 0 else G["hat"] * 0.65, 0.25)
         # melody on the main sections
         if section == "main" and M["lead"]:
-            kind = {"soft": "epiano", "bright": "pluck", "arp": "piano", "bell": "bell"}[M["lead"]]
-            if M["lead"] == "arp":
+            kind = {"soft": "epiano", "bright": "pluck", "arp": "piano", "bell": "bell", "cowbell": "cowbell",
+                    "keys": "piano", "brass": "brass"}[M["lead"]]
+            if M["lead"] == "cowbell":                     # phonk: the cowbell riff on 8ths
+                riff = [0, 2, 3, 2, 0, 4, 3, 2]
+                for i, dd in enumerate(riff):
+                    if (i + b) % 5 == 4:
+                        continue
+                    m = root + 24 + scale[(pent[dd % len(pent)]) % 7]
+                    mix.add(t0 + i * beat / 2, note(_hz(m), beat / 2, kind), G["lead"] * 0.7, 0.2 if i % 2 else -0.2)
+            elif M["lead"] == "brass" and b % 2 == 0:       # long trailer brass stabs
+                mix.add(t0, note(_hz(deg(d) + 12), bar * 0.9, kind), G["lead"] * 0.9)
+                mix.add(t0, note(_hz(deg(d + 4) + 12), bar * 0.9, kind), G["lead"] * 0.6)
+            elif M["lead"] == "arp":
                 for i in range(8):
                     m = chord(d)[i % 3] + 24
                     mix.add(t0 + i * beat / 2, note(_hz(m), beat / 2, kind), G["lead"] * 0.8, 0.3 if i % 2 else -0.3)
@@ -273,5 +313,6 @@ def make_track(mood: str, folder: str, seconds: float = 90, seed: Optional[int] 
     music_sources.record(folder, dest.name, {
         "title": f"{name} {n}", "artist": "Rebels Revolt Shorts (original)", "source": "Made on your PC",
         "license": "Original · no copyright claims", "license_url": "", "credit": "",
+        "mood": mood,
         "note": f"Generated by the app ({info['bpm']} BPM, seed {info['seed']}). Free to use anywhere, monetized too."})
     return dest

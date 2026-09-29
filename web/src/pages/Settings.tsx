@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, get } from "../lib/api";
-import { saveSettings, toast, useStore } from "../lib/store";
+import { saveSettings, setState, toast, useStore } from "../lib/store";
 import { Icon } from "../components/Icon";
 import { Btn, Chip, Field, IconBtn, Seg, Select, Text, Toggle, timeAgo } from "../components/ui";
 import { YouTubeSignIn } from "./SignIn";
@@ -10,10 +10,12 @@ export function SettingsPage() {
   const s = useStore((x) => x.settings);
   const st = useStore((x) => x.status);
   const [login, setLogin] = useState(false);
-  const [sec, setSec] = useState("ai");
+  const want = useStore((x) => x.settingsSec);
+  const [sec, setSec] = useState(want || "ai");
+  useEffect(() => { if (want) { setSec(want); setState({ settingsSec: undefined }); } }, [want]);
   const set = (patch: Record<string, any>) => saveSettings(patch).catch((e) => toast(e.message, "error"));
   const SECS: [string, string, string][] = [["ai", "AI editor", "spark"], ["youtube", "YouTube sign-in", "youtube"],
-    ["watch", "Channel auto-watch", "eye"], ["output", "Output & speed", "zap"], ...(st?.license ? [["license", "License", "key"] as [string, string, string]] : []),
+    ["watch", "Channel auto-watch", "eye"], ["output", "Output & speed", "zap"], ["license", "License", "key"],
     ["about", "About", "info"]];
   return (
     <div className="page settings">
@@ -161,12 +163,42 @@ function LicenseSection() {
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState(false);
   useEffect(() => { get("/api/license").then(setInfo).catch(() => {}); }, []);
+  const copy = (t: string) => { navigator.clipboard?.writeText(t).then(() => toast("Device ID copied", "ok")).catch(() => {}); };
+  const date = (t: number | null) => t ? new Date(t * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "";
+  const activate = async () => {
+    setBusy(true);
+    try { setInfo(await api("/api/license/activate", { key })); setKey(""); toast("Subscription activated. Thank you!", "ok"); }
+    catch (e: any) { toast(e.message, "error"); }
+    setBusy(false);
+  };
+  const st = info?.status;
   return (
     <section>
       <h2>License</h2>
-      {info && <p>Status: <b>{info.status}</b>{info.status !== "active" && info.left != null ? ` · ${info.left} free videos left` : ""}{info.plan ? ` · ${info.plan}` : ""}</p>}
-      <div className="row gap"><Text value={key} onChange={setKey} placeholder="Paste your license key" />
-        <Btn kind="primary" busy={busy} onClick={async () => { setBusy(true); try { setInfo(await api("/api/license/activate", { key })); toast("License activated", "ok"); } catch (e: any) { toast(e.message, "error"); } setBusy(false); }}>Activate</Btn></div>
+      {info && (
+        <div className="lic-card glass-2">
+          {st === "active" ? <>
+            <Chip tone="green" icon="check">{info.plan} plan active</Chip>
+            <p>{info.expires_at ? `Renews / ends on ${date(info.expires_at)}.` : "Never expires."} Unlimited Shorts on this PC.</p>
+          </> : st === "trial" ? <>
+            <Chip tone={info.left > 0 ? "amber" : "red"} icon="key">Free trial</Chip>
+            <p><b>{info.left}</b> of {info.allowed} free Shorts left. After that, a monthly or annual subscription key unlocks unlimited Shorts.</p>
+          </> : <>
+            <Chip tone="red" icon="alert">{st === "expired" ? "Subscription ended" : st === "clock" ? "Check your PC's date" : "Trial used up"}</Chip>
+            <p>{info.message || "Enter a subscription key to keep making Shorts."}</p>
+          </>}
+          {!info.enabled && <p className="muted small">You're running from the project folder, so nothing is blocked here. Customers using the installer get the trial and keys.</p>}
+        </div>
+      )}
+      <Field label="Your Device ID" hint="Send this when you buy, your key is made for this PC.">
+        <div className="row gap"><code className="devid">{info?.device_id || "…"}</code>
+          <Btn small icon="link" onClick={() => info?.device_id && copy(info.device_id)}>Copy</Btn></div>
+      </Field>
+      <Field label="Subscription key">
+        <div className="row gap"><Text value={key} onChange={setKey} placeholder="RRS-XXXXX-XXXXX-…" />
+          <Btn kind="primary" icon="key" busy={busy} disabled={!key.trim()} onClick={activate}>Activate</Btn></div>
+      </Field>
+      <p className="muted small">Keys are checked on this PC (no internet needed). Monthly keys run 31 days, annual 366 days. Moving to a new PC? Ask for a key for the new Device ID.</p>
     </section>
   );
 }

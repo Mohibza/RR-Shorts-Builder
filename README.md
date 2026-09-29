@@ -9,6 +9,21 @@ Paste a YouTube link and Rebels Revolt Shorts turns the long video into ready-to
 5. **Styles every Short differently**: animated captions, hook titles, end cards, color grades, camera motion, intro effects, progress bar, watermark, part labels, and optional background music that gets quieter under speech
 6. **Saves** MP4 + thumbnail + title/description/hashtags text for each Short, ready for you to review and upload
 
+## What's new in 2.3
+
+- **Live preview = export.** The preview now uses the export's exact caption sizing (per-font), two-line splits, emphasis colours, tilts, heading wrapping, zooms and openings. It also plays smoothly: two players take turns so cut pauses no longer stall, and the editor no longer redraws 60 times a second.
+- **Auto vibe.** Every clip is read for its feel (hype, motivational, emotional, funny, suspense, storytime, tips, chill; your AI key can decide it too). The vibe picks:
+  - the **music** (your library is analysed once for tempo / energy / mood; the track's drop is lined up just after the hook; tracks in `Music\Trending` get priority; if nothing fits, an original track is composed once)
+  - the **sound pack** (Cinematic, Hype / Trap, Clean, Funny, Tech), with random variations so no two Shorts sound the same and no sound repeats back to back
+  - **focus zooms** on key words, each with its own sound hit
+  - the **opening effect** (new: Zoom Slam, Punch In, Whip Pan, RGB Glitch) and the colour look
+- **New original music moods:** Phonk, Drill, Emotional Piano, Cinematic Trailer, Funky Groove. Music search has one-tap trending styles.
+- **Editor → Vibe & FX:** change the vibe, opening, zoom strength, add/remove zooms at the playhead (yellow marks on the timeline). **Audio:** see the auto-picked track, pick another mood, choose the sound pack, **Shuffle** for a new mix.
+- **About 2x faster export:** zooms and sharpening now run on the small source crop before upscaling.
+- **AI fallback:** if the chosen AI key fails (invalid / no credit), the app tries your other AI keys before the offline editor.
+- **Trial + subscription keys (offline):** 3 free Shorts per PC, then a Monthly / Annual / Lifetime key. Keys are signed and locked to the PC's Device ID. The trial counter is encrypted in several places, and tampering or a clock rollback is detected. Make keys with `tools\keymaker\RR Key Maker.bat` (first time: **Set up**, then rebuild the installer). Your signing key stays in `%USERPROFILE%\RR-License-Keys` and must never be shared or committed. Later, set `ONLINE_URL` in `shortsforge/licensing.py` to add an online check.
+- **git_menu.bat:** one file for GitHub: 1 = Pull, 2 = Push, 3 = Status.
+
 ## What's new in 2.2
 
 - **Fixed:** "Exact frame" error (`name 'joblog' is not defined`).

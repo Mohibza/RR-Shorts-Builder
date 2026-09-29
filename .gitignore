@@ -16,3 +16,7 @@ bin/*.exe
 # license server local test artifacts (the deployed server keeps its own DB, not this repo)
 license-server/*.db
 license-server/__pycache__/
+# license signing keys must NEVER be committed (the Key Maker keeps them in %USERPROFILE%\RR-License-Keys)
+signing_key*.txt
+issued_keys*.csv
+RR-License-Keys/

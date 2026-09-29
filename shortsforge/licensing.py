@@ -1,131 +1,249 @@
-"""Trial & license gate.
+"""Trial + subscription keys (works fully offline; an online check can be switched on later).
 
-Three video Shorts on the house, then a license key. The server (license-server/) is the source of
-truth for how many videos a *device* has used — identified by a hardware fingerprint, not by this
-app's own settings folder — so deleting %APPDATA%\\RRShortsBuilder or reinstalling does not reset the
-trial. This module only keeps a local, best-effort cached copy of the last state the server gave us,
-for two reasons: so the app can show "2 of 3 used" instantly without a network round trip, and so a
-paid, already-activated user can keep working through a short internet outage.
+* Trial: 3 free Shorts per PC. Re-exporting the same clip doesn't use another one.
+* After that: a Monthly or Annual key (or Lifetime) made with the owner's Key Maker (tools/keymaker).
+  Keys are Ed25519-signed and locked to one PC's Device ID, so they can't be forged, edited or shared:
+  only the public key is inside the app, the private key never leaves the owner's computer.
+* The trial counter and the activated key are stored encrypted + signed (keyed to this PC) in three places
+  (settings folder, local app data, registry). Deleting one copy or reinstalling doesn't reset the trial,
+  editing a copy is detected (tampering = trial over), and turning the PC clock back is detected.
 
-Call `gate()` once, right before a video starts processing (pipeline.py does this). It either returns
-quietly (go ahead) or raises LicenseError with a message fit to show the user.
-
-Nothing here is unbeatable — a determined person can always patch a local .exe. The goal is to stop
-the trivial case (reinstall, or hand-edit a JSON file) from being a free unlimited trial, which is
-what "genuine" means for a small paid product, not enterprise DRM.
+Honest limit: no offline check can stop someone who modifies the program itself. The signed keys make
+forging impossible and the encrypted counter stops the easy resets; turning on the online check
+(ONLINE_URL, once the website is live) is what shuts out cracked copies for good.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import os
-import platform
+import secrets
+import struct
 import subprocess
+import threading
 import time
-import urllib.error
-import urllib.request
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from . import ed25519
 from .config import data_dir
 
-# Set this to your deployed server once license-server/ is live (see license-server/README.md).
-# Can be overridden without rebuilding by setting the RRSF_LICENSE_SERVER environment variable.
-LICENSE_SERVER_URL = os.environ.get("RRSF_LICENSE_SERVER", "https://license.rrshortsbuilder.com").rstrip("/")
+FREE_SHORTS = 3
+PLANS = {1: ("monthly", "Monthly"), 2: ("annual", "Annual"), 3: ("lifetime", "Lifetime")}
+EPOCH = 1704067200            # 2024-01-01: key dates are days since then
+GRACE_DAYS = 3                # a subscription keeps working this long after its end date
+# Later: your website's license API. Empty = offline only.
+ONLINE_URL = os.environ.get("RRSF_LICENSE_SERVER", "").rstrip("/")
+_SALT = bytes.fromhex("5b1e7a0c93d24f6e8a41c0de77f3a219")   # part of the state key (with this PC's id)
+_lock = threading.Lock()
 
-# Baked into this build. Every copy of a given installer ships the same trial key; the server's
-# per-device counter is what actually stops trial abuse, not this key's secrecy (see the server's
-# ALLOWED_TRIAL_KEYS option if you ever need to kill a leaked build).
-TRIAL_KEY = "RRSF-TRIAL-2026"
 
-STATE_FILE = data_dir() / "license.dat"
-REQUEST_TIMEOUT = 10
+class LicenseError(RuntimeError):
+    """Raised when a Short may not be made. .kind: "blocked" (needs a key) | "offline"."""
+
+    def __init__(self, message: str, kind: str = "blocked"):
+        super().__init__(message)
+        self.kind = kind
 
 
 def enabled() -> bool:
-    """The trial/license check runs in installer builds (the .exe you give to others) or when forced with
-    RRSF_LICENSE_ENFORCE=1. Running from the project folder (run.bat, your own copy) skips it, so your own
-    work never stops while the license server isn't deployed yet."""
+    """Enforced in the installer build (the .exe you sell). Running from the project folder (run.bat) skips
+    it so your own work never stops; set RRSF_LICENSE_ENFORCE=1 to test the trial from source."""
     import sys
     force = os.environ.get("RRSF_LICENSE_ENFORCE", "")
     if force in ("0", "1"):
         return force == "1"
     return bool(getattr(sys, "frozen", False))
-OFFLINE_GRACE_DAYS = 3   # an already-activated PAID device can work this long without reaching the server
 
 
-class LicenseError(RuntimeError):
-    """Raised by gate() when a video should NOT be processed. .kind tells the UI what to offer."""
-
-    def __init__(self, message: str, kind: str = "blocked"):
-        super().__init__(message)
-        self.kind = kind   # "blocked" (buy/activate) | "offline" (can't verify right now)
-
-
-@dataclass
-class LicenseState:
-    status: str = "unknown"          # trial | active | expired | banned | unknown
-    videos_used: int = 0
-    videos_allowed: int = 3
-    plan: Optional[str] = None
-    expires_at: Optional[float] = None
-    token: str = ""
-    fingerprint: str = ""
-    cached_at: float = 0.0
-
-    @property
-    def videos_left(self) -> int:
-        if self.status == "active":
-            return 10 ** 9
-        return max(0, self.videos_allowed - self.videos_used)
-
-
-# ------------------------------------------------------------------------------------------- fingerprint
-def _windows_machine_guid() -> Optional[str]:
+# ------------------------------------------------------------------------------------------- this PC
+def _machine_guid() -> Optional[str]:
     try:
         import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as k:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography", 0,
+                            winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0)) as k:
             return winreg.QueryValueEx(k, "MachineGuid")[0]
     except Exception:
         return None
 
 
-def _wmic_uuid() -> Optional[str]:
+def _board_uuid() -> Optional[str]:
     try:
-        out = subprocess.check_output(["wmic", "csproduct", "get", "uuid"], timeout=5,
-                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        lines = [l.strip() for l in out.decode(errors="ignore").splitlines() if l.strip()]
-        return lines[1] if len(lines) > 1 and lines[1].upper() != "UUID" else None
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_ComputerSystemProduct).UUID"],
+            timeout=8, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        v = out.decode(errors="ignore").strip()
+        return v if len(v) > 8 else None
     except Exception:
         return None
 
 
+_FP: Optional[str] = None
+
+
 def fingerprint() -> str:
-    """A stable per-PC id. Prefers the Windows install's own MachineGuid (survives reinstalling this
-    app; changes only on a Windows reinstall), falls back to the motherboard UUID, then to a random
-    id persisted in the app's settings folder (dev machines / non-Windows)."""
-    raw = _windows_machine_guid() or _wmic_uuid()
+    """Stable id of this PC (Windows MachineGuid; motherboard UUID or a stored random id as fallback)."""
+    global _FP
+    if _FP:
+        return _FP
+    raw = _machine_guid() or (_board_uuid() if os.name == "nt" else None)
     if not raw:
         marker = data_dir() / ".device_id"
         try:
             raw = marker.read_text().strip()
         except OSError:
-            import secrets
             raw = secrets.token_hex(16)
             try:
                 marker.write_text(raw, encoding="utf-8")
             except OSError:
                 pass
-    salted = f"rrsf::{raw}::{platform.node()}"
-    return hashlib.sha256(salted.encode()).hexdigest()[:32]
+    _FP = hashlib.sha256(f"rrsf::{raw}".encode()).hexdigest()
+    return _FP
 
 
-# ------------------------------------------------------------------------------------------- local cache
+def _device_digest() -> bytes:
+    return hashlib.sha256(("rrs-device:" + fingerprint()).encode()).digest()
+
+
+def device_bytes() -> bytes:
+    return _device_digest()[:8]
+
+
+def device_id() -> str:
+    """What a customer sends you to get a key: RRD-XXXX-XXXX-XXXX-XXXX."""
+    b = base64.b32encode(_device_digest()[:10]).decode()
+    return "RRD-" + "-".join(b[i:i + 4] for i in range(0, 16, 4))
+
+
+def parse_device_id(s: str) -> bytes:
+    t = "".join(ch for ch in s.upper() if ch.isalnum())
+    if t.startswith("RRD"):
+        t = t[3:]
+    if len(t) != 16:
+        raise ValueError("A Device ID looks like RRD-XXXX-XXXX-XXXX-XXXX")
+    try:
+        return base64.b32decode(t)[:8]
+    except Exception:
+        raise ValueError("That Device ID has a typo. It looks like RRD-XXXX-XXXX-XXXX-XXXX")
+
+
+# ------------------------------------------------------------------------------------------- keys
+@dataclass
+class Key:
+    plan: int
+    issued: int          # days since EPOCH
+    expires: int         # days since EPOCH (0xFFFF = never)
+    device: bytes        # 8 bytes, all zero = any PC
+    kid: int             # key number (for revoking later)
+
+    @property
+    def plan_name(self) -> str:
+        return PLANS.get(self.plan, ("?", "?"))[1]
+
+    @property
+    def expires_at(self) -> Optional[float]:
+        return None if self.expires == 0xFFFF else EPOCH + self.expires * 86400.0
+
+
+_MAGIC = b"R1"
+
+
+def pack(k: Key) -> bytes:
+    return _MAGIC + struct.pack(">BHH8sI", k.plan, k.issued, k.expires, k.device, k.kid) + b"\0"
+
+
+def unpack(b: bytes) -> Key:
+    plan, issued, exp, dev, kid = struct.unpack(">BHH8sI", b[2:19])
+    return Key(plan, issued, exp, dev, kid)
+
+
+def encode_key(payload: bytes, sig: bytes) -> str:
+    t = base64.b32encode(payload + sig).decode().rstrip("=")
+    return "RRS-" + "-".join(t[i:i + 5] for i in range(0, len(t), 5))
+
+
+def decode_key(text: str) -> tuple[bytes, bytes]:
+    t = "".join(ch for ch in (text or "").upper() if ch.isalnum())
+    if t.startswith("RRS"):
+        t = t[3:]
+    try:
+        raw = base64.b32decode(t + "=" * (-len(t) % 8))
+    except Exception:
+        raise LicenseError("That doesn't look like a Rebels Revolt Shorts key. Copy the whole key and try again.")
+    if len(raw) != 20 + 64 or raw[:2] != _MAGIC:
+        raise LicenseError("That doesn't look like a Rebels Revolt Shorts key. Copy the whole key and try again.")
+    return raw[:20], raw[20:]
+
+
+def _public_key() -> bytes:
+    from .license_pub import PUBLIC_KEY_HEX
+    return bytes.fromhex(PUBLIC_KEY_HEX) if PUBLIC_KEY_HEX else b""
+
+
+def check_key(text: str, now: Optional[float] = None) -> Key:
+    """Validate a key for THIS PC. Raises LicenseError with a message for the customer."""
+    payload, sig = decode_key(text)
+    pub = _public_key()
+    if not pub or not ed25519.verify(pub, payload, sig):
+        raise LicenseError("This key isn't valid. Check you copied all of it, or contact support.")
+    k = unpack(payload)
+    if k.device != b"\0" * 8 and not hmac.compare_digest(k.device, device_bytes()):
+        raise LicenseError(f"This key was made for a different PC. Your Device ID is {device_id()}.")
+    now = now or time.time()
+    if k.expires_at and now > k.expires_at + GRACE_DAYS * 86400:
+        raise LicenseError(f"This {k.plan_name.lower()} key ended on {time.strftime('%d %b %Y', time.localtime(k.expires_at))}. "
+                           "Renew your subscription to keep making Shorts.")
+    return k
+
+
+# ------------------------------------------------------------------------------------------- stored state
+def _state_key() -> bytes:
+    return hashlib.sha256(b"rrs-state-v2" + _SALT + fingerprint().encode()).digest()
+
+
+def _stream(key: bytes, nonce: bytes, n: int) -> bytes:
+    out, i = b"", 0
+    while len(out) < n:
+        out += hashlib.sha256(key + nonce + i.to_bytes(4, "big")).digest()
+        i += 1
+    return out[:n]
+
+
+def _seal(obj: dict) -> bytes:
+    data = json.dumps(obj, separators=(",", ":")).encode()
+    k = _state_key()
+    nonce = secrets.token_bytes(12)
+    ct = bytes(a ^ b for a, b in zip(data, _stream(k, nonce, len(data))))
+    mac = hmac.new(k, nonce + ct, hashlib.sha256).digest()
+    return _dpapi(b"RS2" + nonce + ct + mac, True)
+
+
+def _open(blob: bytes) -> Optional[dict]:
+    """dict if genuine, {"_bad": True} if tampered, None if unreadable/empty."""
+    try:
+        raw = _dpapi(blob, False)
+    except Exception:
+        return {"_bad": True}
+    if raw[:1] == b"{":           # the old (v2.2) license cache: not ours to judge, ignore it
+        return None
+    if not raw.startswith(b"RS2") or len(raw) < 3 + 12 + 32:
+        return {"_bad": True} if raw else None
+    nonce, ct, mac = raw[3:15], raw[15:-32], raw[-32:]
+    k = _state_key()
+    if not hmac.compare_digest(mac, hmac.new(k, nonce + ct, hashlib.sha256).digest()):
+        return {"_bad": True}
+    try:
+        return json.loads(bytes(a ^ b for a, b in zip(ct, _stream(k, nonce, len(ct)))).decode())
+    except Exception:
+        return {"_bad": True}
+
+
 def _dpapi(data: bytes, protect: bool) -> bytes:
-    """Windows DPAPI, tied to this Windows user+machine — copying the file elsewhere won't decrypt.
-    No-op passthrough off Windows (dev/testing only; the real product targets Windows)."""
-    if os.name != "nt":
+    """Windows DPAPI: only this Windows user on this PC can decrypt. Pass-through elsewhere (dev/tests)."""
+    if os.name != "nt" or not data:
         return data
     import ctypes
     from ctypes import wintypes
@@ -138,122 +256,235 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
     out = BLOB()
     fn = ctypes.windll.crypt32.CryptProtectData if protect else ctypes.windll.crypt32.CryptUnprotectData
     if not fn(ctypes.byref(inp), None, None, None, None, 0, ctypes.byref(out)):
-        raise OSError("Windows could not encrypt/decrypt the license cache")
+        raise OSError("DPAPI failed")
     try:
         return ctypes.string_at(out.pbData, out.cbData)
     finally:
         ctypes.windll.kernel32.LocalFree(out.pbData)
 
 
-def _load_cached() -> Optional[LicenseState]:
+def _files() -> list[Path]:
+    local = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / ".cache"))
+    return [data_dir() / "license.dat", local / "RRShorts" / "cache" / "idx.bin"]
+
+
+_REG = r"Software\RRShortsBuilder\Cache"
+
+
+def _reg_read() -> Optional[bytes]:
+    if os.name != "nt":
+        return None
     try:
-        raw = STATE_FILE.read_bytes()
-        data = json.loads(_dpapi(raw, False).decode("utf-8"))
-        return LicenseState(**data)
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG) as k:
+            return bytes(winreg.QueryValueEx(k, "s")[0])
     except Exception:
         return None
 
 
-def _save_cached(state: LicenseState) -> None:
+def _reg_write(blob: bytes) -> None:
+    if os.name != "nt":
+        return
     try:
-        state.cached_at = time.time()
-        STATE_FILE.write_bytes(_dpapi(json.dumps(asdict(state)).encode("utf-8"), True))
-    except OSError:
-        pass  # caching is best-effort; the server call still went through
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, _REG) as k:
+            winreg.SetValueEx(k, "s", 0, winreg.REG_BINARY, blob)
+    except Exception:
+        pass
 
 
-# ------------------------------------------------------------------------------------------- server calls
-def _post(path: str, body: dict) -> dict:
-    req = urllib.request.Request(
-        LICENSE_SERVER_URL + path, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
+@dataclass
+class State:
+    used: list = field(default_factory=list)    # clip ids that used a free Short
+    first: float = 0.0
+    last: float = 0.0                            # latest time the app saw (clock-rollback check)
+    key: str = ""
+    tampered: bool = False
+
+
+def _load() -> State:
+    blobs = []
+    for f in _files():
         try:
-            detail = json.loads(e.read().decode()).get("detail", str(e))
-        except Exception:
-            detail = str(e)
-        raise LicenseError(str(detail), kind="blocked" if e.code in (402, 403, 409, 410) else "offline") from e
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise LicenseError(f"Can't reach the license server ({e}).", kind="offline") from e
+            blobs.append(f.read_bytes())
+        except OSError:
+            pass
+    r = _reg_read()
+    if r:
+        blobs.append(r)
+    st = State()
+    firsts, kt = [], -1.0
+    for b in blobs:
+        d = _open(b)
+        if not d:
+            continue
+        if d.get("_bad"):
+            st.tampered = True
+            continue
+        st.used = sorted(set(st.used) | set(d.get("used") or []))
+        if d.get("first"):
+            firsts.append(float(d["first"]))
+        st.last = max(st.last, float(d.get("last") or 0))
+        if d.get("key") and float(d.get("kt") or 0) >= kt:
+            st.key, kt = d["key"], float(d.get("kt") or 0)
+    st.first = min(firsts) if firsts else 0.0
+    st._kt = kt if kt > 0 else 0.0   # type: ignore[attr-defined]
+    return st
 
 
-def _state_from(resp: dict, fp: str) -> LicenseState:
-    return LicenseState(status=resp["status"], videos_used=resp["videos_used"], videos_allowed=resp["videos_allowed"],
-                        plan=resp.get("plan"), expires_at=resp.get("expires_at"), token=resp["token"], fingerprint=fp)
+def _save(st: State) -> None:
+    blob = _seal({"used": st.used[-50:], "first": st.first, "last": st.last, "key": st.key,
+                  "kt": getattr(st, "_kt", time.time()) if st.key else 0, "v": 2})
+    for f in _files():
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            tmp = f.with_suffix(".tmp")
+            tmp.write_bytes(blob)
+            os.replace(tmp, f)
+        except OSError:
+            pass
+    _reg_write(blob)
 
 
-def activate() -> LicenseState:
-    """First run (or whenever there's no usable local cache): register/refetch this device's state."""
-    from . import __version__
-    fp = fingerprint()
-    resp = _post("/v1/activate", {"fingerprint": fp, "trial_key": TRIAL_KEY, "app_version": __version__})
-    state = _state_from(resp, fp)
-    _save_cached(state)
-    return state
+# ------------------------------------------------------------------------------------------- public API
+@dataclass
+class LicenseState:
+    status: str = "trial"            # trial | active | expired | clock | tampered
+    videos_used: int = 0
+    videos_allowed: int = FREE_SHORTS
+    plan: Optional[str] = None
+    expires_at: Optional[float] = None
+    fingerprint: str = ""
+    device_id: str = ""
+    message: str = ""
+
+    @property
+    def videos_left(self) -> int:
+        return 10 ** 9 if self.status == "active" else max(0, self.videos_allowed - self.videos_used)
 
 
-def redeem(license_key: str) -> LicenseState:
-    """User pastes a paid key (Settings -> License). Raises LicenseError with a user-facing message on failure."""
-    fp = fingerprint()
-    resp = _post("/v1/redeem", {"fingerprint": fp, "license_key": license_key.strip()})
-    state = _state_from(resp, fp)
-    _save_cached(state)
-    return state
+def _evaluate(st: State) -> LicenseState:
+    now = time.time()
+    ls = LicenseState(videos_used=min(FREE_SHORTS, len(st.used)), device_id=device_id(), fingerprint=device_id())
+    if st.tampered and not st.key:
+        ls.status, ls.videos_used = "tampered", FREE_SHORTS
+        ls.message = "The trial data on this PC was changed, so the free Shorts are used up."
+    if st.last and now < st.last - 36 * 3600:
+        ls.status = "clock"
+        ls.message = "Your PC's date looks wrong (it went back in time). Set the correct date and time to continue."
+        return ls
+    if st.key:
+        try:
+            k = check_key(st.key, now)
+            ls.status, ls.plan, ls.expires_at = "active", k.plan_name, k.expires_at
+            return ls
+        except LicenseError as e:
+            ls.status, ls.message = "expired", str(e)
+            try:
+                k = unpack(decode_key(st.key)[0])
+                ls.plan, ls.expires_at = k.plan_name, k.expires_at
+            except Exception:
+                pass
+    return ls
 
 
 def current_state() -> LicenseState:
-    """For the UI: what we currently believe, without talking to the server. Call gate()/refresh() first
-    if you need it to be authoritative."""
-    return _load_cached() or LicenseState()
+    with _lock:
+        st = _load()
+        return _evaluate(st)
 
 
-def refresh() -> LicenseState:
-    """Heartbeat: re-sync the cached state with the server without consuming a video. Safe to call on
-    app startup / Settings page open. Falls back to the cache on a network error."""
-    cached = _load_cached()
-    fp = cached.fingerprint if cached and cached.fingerprint else fingerprint()
-    if not cached or not cached.token:
-        return activate()
-    try:
-        resp = _post("/v1/validate", {"fingerprint": fp, "token": cached.token})
-    except LicenseError:
-        return cached
-    state = _state_from(resp, fp)
-    _save_cached(state)
-    return state
+def _touch(st: State) -> None:
+    now = time.time()
+    if not st.first:
+        st.first = now
+    if now > st.last:
+        st.last = now
 
 
-def gate() -> LicenseState:
-    """Call this right before processing a video. Returns the state if allowed; raises LicenseError if not.
+def check(slot: str) -> None:
+    """Raise early (before any work) if this Short couldn't be made. Uses nothing up."""
+    reserve(slot, consume=False)
 
-    Trial: always asks the server (it's the only source of truth for the count) and blocks outright if
-    the server can't be reached — a trial claim we can't verify doesn't get the benefit of the doubt.
-    Paid: tries the server first, but if it's unreachable and the last confirmed state (within
-    OFFLINE_GRACE_DAYS) was an unexpired paid license, lets it through so a network blip doesn't stop
-    someone who already paid.
-    """
-    cached = _load_cached()
-    fp = cached.fingerprint if cached and cached.fingerprint else fingerprint()
-    if not cached or not cached.token:
-        cached = activate()
-    try:
-        resp = _post("/v1/consume", {"fingerprint": fp, "token": cached.token, "count": 1})
-        state = _state_from(resp, fp)
-        _save_cached(state)
-        return state
-    except LicenseError as e:
-        if e.kind == "blocked":
-            raise
-        # network/server unreachable
-        grace_ok = cached.status == "active" and time.time() - cached.cached_at < OFFLINE_GRACE_DAYS * 86400
-        if grace_ok and (not cached.expires_at or cached.expires_at > time.time()):
-            return cached
-        if cached.status == "active":
-            raise LicenseError(
-                "Couldn't verify your license (offline too long). Connect to the internet once to re-sync.",
-                kind="offline") from e
-        raise LicenseError(
-            "Couldn't verify your trial — check your internet connection and try again.", kind="offline") from e
+
+def reserve(slot: str, consume: bool = True) -> Optional[str]:
+    """Call right before rendering a Short. Returns a token for release() if a free Short was used;
+    raises LicenseError when the trial is over / the subscription ended."""
+    if not enabled():
+        return None
+    with _lock:
+        st = _load()
+        ls = _evaluate(st)
+        if ls.status == "clock":
+            raise LicenseError(ls.message)
+        if ls.status == "active":
+            if consume:
+                _touch(st)
+                _save(st)
+            return None
+        h = hashlib.sha256(("slot:" + slot).encode()).hexdigest()[:16]
+        if h in st.used and not st.tampered:          # re-export of a clip that already used a free Short
+            if consume:
+                _touch(st)
+                _save(st)
+            return None
+        if ls.status in ("expired",):
+            raise LicenseError(ls.message + f"  Enter a new key in Settings → License (Device ID {device_id()}).")
+        if len(st.used) >= FREE_SHORTS or st.tampered:
+            raise LicenseError(f"Your {FREE_SHORTS} free Shorts are used up. Subscribe (monthly or annual) and enter "
+                               f"your key in Settings → License to keep going. Your Device ID: {device_id()}")
+        if not consume:
+            return None
+        st.used.append(h)
+        _touch(st)
+        _save(st)
+        return h
+
+
+def release(token: Optional[str]) -> None:
+    """The render failed or was cancelled: give the free Short back."""
+    if not token:
+        return
+    with _lock:
+        st = _load()
+        if token in st.used:
+            st.used.remove(token)
+            _save(st)
+
+
+def redeem(text: str) -> LicenseState:
+    """Activate a key from Settings → License."""
+    k = check_key(text)
+    with _lock:
+        st = _load()
+        st.key = encode_key(*decode_key(text))
+        st._kt = time.time()   # type: ignore[attr-defined]
+        st.tampered = False
+        _touch(st)
+        _save(st)
+        ls = _evaluate(st)
+    if ls.status != "active":
+        raise LicenseError(ls.message or "Couldn't activate this key.")
+    return ls
+
+
+def gate() -> None:
+    """Kept for older callers: analysing a video is always free; making Shorts is what's counted."""
+    return None
+
+
+def make_key(private_hex: str, plan: str, device: str = "", days: Optional[int] = None,
+             kid: Optional[int] = None, start: Optional[float] = None) -> str:
+    """Used by the Key Maker (tools/keymaker). plan: monthly | annual | lifetime."""
+    pid = {"monthly": 1, "annual": 2, "lifetime": 3}[plan]
+    start = start or time.time()
+    issued = int((start - EPOCH) // 86400)
+    if pid == 3:
+        exp = 0xFFFF
+    else:
+        exp = issued + int(days or (31 if pid == 1 else 366))
+    dev = parse_device_id(device) if device.strip() else b"\0" * 8
+    k = Key(pid, issued, exp, dev, kid if kid is not None else secrets.randbits(32))
+    payload = pack(k)
+    sig = ed25519.sign(bytes.fromhex(private_hex), payload)
+    return encode_key(payload, sig)

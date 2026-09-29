@@ -153,7 +153,25 @@ class Engine:
                     (s.clip_picker == "gemini" and s.gemini_api_key) or
                     (s.clip_picker == "claude" and s.anthropic_api_key) or
                     (s.clip_picker == "openai" and getattr(s, "openai_api_key", ""))) else "offline",
-                "license": licensing.enabled()}
+                "license": licensing.enabled(), "trial": self._trial()}
+
+    _trial_cache: tuple = (0.0, None)
+
+    def _trial(self) -> Optional[dict]:
+        """Trial / subscription summary for the sidebar (cached a few seconds)."""
+        if not licensing.enabled():
+            return None
+        t, v = self._trial_cache
+        if time.time() - t < 4:
+            return v
+        try:
+            st = licensing.current_state()
+            v = {"status": st.status, "left": None if st.status == "active" else st.videos_left,
+                 "plan": st.plan, "expires_at": st.expires_at}
+        except Exception:
+            v = None
+        self._trial_cache = (time.time(), v)
+        return v
 
     # ------------------------------------------------------------ analyse
     def add_sources(self, text: str, auto_export: Optional[bool] = None) -> dict:
@@ -387,6 +405,11 @@ class Engine:
                 task.update(state="cancelled", stage="Cancelled")
                 projects.update_clip(task["project"], task["clip"], status="new")
                 self.bus.emit("export", task)
+            except licensing.LicenseError as e:
+                task.update(state="failed", error=str(e))
+                projects.update_clip(task["project"], task["clip"], status="new")
+                self.bus.emit("export", task)
+                self.bus.emit("license", {"text": str(e)})
             except Exception as e:
                 task.update(state="failed", error=_first_line(e))
                 projects.update_clip(task["project"], task["clip"], status="failed")

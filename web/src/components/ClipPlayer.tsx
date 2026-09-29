@@ -5,6 +5,8 @@ import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo
 import { api, mediaUrl } from "../lib/api";
 import { drawLayout, type FrameParams } from "../lib/frame";
 import { buildTimeline, cameraAt, chunkWords, cleanWord, fmt, segAt, type Timeline } from "../lib/timeline";
+import { focusWindows, introAt, motionAt, type FocusWin } from "../lib/fx";
+import { publishTime } from "../lib/playtime";
 import type { CapStyle, Catalog, Clip, CtaStyle, Edits, HookStyle, Place, Style } from "../lib/types";
 import { Icon } from "./Icon";
 
@@ -17,6 +19,7 @@ type Props = {
   camera?: [number, number][]; framing?: string; srcWH?: [number, number];
   onTime?: (T: number, D: number) => void; className?: string; fill?: boolean;
   withAudio?: boolean;   // editor: play the sound effects + music under the voice, like the export
+  onPlan?: (plan: FxPlan) => void;
 };
 
 const CHAR_W: Record<string, number> = {
@@ -38,53 +41,82 @@ const GRADE_CSS: Record<string, string> = {
 const VIGNETTE = new Set(["cinematic", "vintage", "moody", "noir"]);
 const POS: Record<string, number> = { upper: 0.33, middle: 0.52, lower: 0.67 };
 
-let METRICS: Record<string, { w: Record<string, number>; other: number }> = {};
+type FM = { w: Record<string, number>; other: number; em?: number; dy?: number };
+let METRICS: Record<string, FM> = {};
 export function setFontMetrics(m: typeof METRICS | undefined) { if (m) METRICS = m; }
 
-function fitSize(font: string, text: string, size: number, st: { pop?: boolean; emph?: string; bord?: number; hl_box?: string; box?: boolean }) {
+// ASS/libass font sizes measure the whole font height (win ascent+descent); CSS sizes measure the em square.
+// emOf() converts, so a size-190 caption in the export and in the preview are the same pixels.
+const emOf = (font: string) => METRICS[font]?.em ?? 0.8;
+const dyOf = (font: string) => METRICS[font]?.dy ?? 0;    // baseline difference libass vs browser, in font sizes
+function textW(font: string, text: string, size: number) {
   const m = METRICS[font];
-  if (m) {                       // exact per-letter widths, same numbers the export uses
-    const grow = st.pop || st.emph ? 1.12 : 1;
-    const pad = 2 * ((st.bord || 6) + (st.hl_box ? 16 : 0) + (st.box ? st.bord || 0 : 0));
-    const unit = [...text].reduce((a, c) => a + (m.w[c] ?? m.other), 0) * grow;
-    return unit > 0 ? Math.min(size, (952 - pad) / unit) : size;
-  }
-  const cw = CHAR_W[font] ?? 0.6;
+  if (!m) return text.length * size * (CHAR_W[font] ?? 0.6);
+  return size * [...text].reduce((a, c) => a + (m.w[c] ?? m.other), 0);
+}
+const SAFE_W = 1080 - 2 * 64;
+
+/** captions.fit_size: largest size (up to max) at which the line fits the safe width, never below 62%. */
+function fitSize(font: string, text: string, maxSize: number, st: { pop?: boolean; emph?: string; bord?: number; hl_box?: string; box?: boolean }, rtl = false) {
   const grow = st.pop || st.emph ? 1.12 : 1;
-  const pad = 2 * ((st.bord || 6) + (st.hl_box ? 16 : 0) + (st.box ? st.bord || 0 : 0));
-  const unit = text.length * cw * grow;
-  return unit > 0 ? Math.min(size, (952 - pad) / unit) : size;
+  const pad = 2 * ((st.bord ?? 6) + (st.hl_box ? 16 : 0) + (st.box ? st.bord || 0 : 0));
+  const unit = textW(font, text, 1) * grow;
+  if (unit <= 0) return maxSize;
+  const fs = Math.floor((SAFE_W - pad) / unit);
+  const lo = Math.floor(maxSize * (rtl ? 0.55 : 0.62));
+  return Math.max(lo, Math.min(maxSize, fs));
 }
 
-function motionZoom(motion: string, T: number, D: number): [number, number, number] {
-  const d = Math.max(D, 0.1);
-  switch (motion) {
-    case "slow_zoom": return [1 + 0.1 * T / d, 0, 0];
-    case "zoom_out": return [1.12 - 0.1 * T / d, 0, 0];
-    case "ken_burns": { const z = 1.04 + 0.08 * T / d; return [z, (1 - 1 / z) / 2 * 0.6 * (T / d - 0.5) * 2, 0]; }
-    case "breathe": return [1.035 + 0.025 * Math.sin(T * 2.2), 0, 0];
-    case "pan_left": return [1.1, -(1 - 1 / 1.1) / 2 * 0.9 * (2 * T / d - 1), 0];
-    case "pan_right": return [1.1, (1 - 1 / 1.1) / 2 * 0.9 * (2 * T / d - 1), 0];
-    case "drift_up": return [1.08, 0, -(1 - 1 / 1.08) / 2 * 0.9 * (2 * T / d - 1)];
-    case "zoom_pulse": return [1.04 + 0.03 * Math.pow(Math.abs(Math.sin(T * Math.PI)), 6), 0, 0];
-    case "sway": return [1.08, (1 - 1 / 1.08) / 2 * 0.8 * Math.sin(T * 0.55), (1 - 1 / 1.08) / 2 * 0.6 * Math.sin(T * 0.37 + 1)];
-    case "punch": return [1.02 + 0.06 * (Math.sin(T * 1.7) > 0.93 ? 1 : 0), 0, 0];
-    default: return [1, 0, 0];
+/** captions.wrap_measured: greedy wrap with real widths; null if more than maxLines. */
+function wrapMeasured(font: string, text: string, size: number, maxLines: number, width = 920): string[] | null {
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of text.split(/\s+/).filter(Boolean)) {
+    const cand = (cur + " " + w).trim();
+    if (cur && textW(font, cand, size) > width) { lines.push(cur); cur = w; } else cur = cand;
+    if (textW(font, cur, size) > width) return null;
   }
+  if (cur) lines.push(cur);
+  return lines.length <= maxLines ? lines : null;
 }
+
+const isEmph = (w: string, emph: Set<string>) => {
+  const k = w.toLowerCase().replace(/[^\p{L}\p{N}_']/gu, "");
+  return !!k && (emph.has(k) || /^\$?\d[\d,.%]*[kmb%]?$/.test(k));
+};
+
+export type FxPlan = {
+  emphasis?: string[]; tilts?: number[];
+  vibe: string; vibe_name: string; seed: number; punches: [number, number][]; pack: string; pack_name: string;
+  music: string; music_name: string; music_offset: number; music_why: string; motion: string; intro: string; grade: string;
+};
 
 export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p, ref) {
   const { clip, edits, style, catalog, settings } = p;
-  const video = useRef<HTMLVideoElement>(null);
+  // two video elements take turns: while one plays, the other already waits at the start of the next part,
+  // so jumping over removed pauses/words is seamless instead of a stall on every seek
+  const vA = useRef<HTMLVideoElement>(null);
+  const vB = useRef<HTMLVideoElement>(null);
+  const act = useRef(0);
+  const vid = (i: number) => (i === 0 ? vA.current : vB.current);
+  const cur = () => vid(act.current);
   const canvas = useRef<HTMLCanvasElement>(null);
   const box = useRef<HTMLDivElement>(null);
+  const stageEl = useRef<HTMLDivElement>(null);
+  const pbarEl = useRef<HTMLDivElement>(null);
+  const introEl = useRef<HTMLDivElement>(null);
+  const rangeEl = useRef<HTMLInputElement>(null);
+  const timeEl = useRef<HTMLSpanElement>(null);
   const segIdx = useRef(0);
+  const prepped = useRef(-1);         // segment index the standby video is waiting at
   const audio = useRef<HTMLAudioElement>(null);
   const [audioSrc, setAudioSrc] = useState("");
   const [audioBusy, setAudioBusy] = useState(false);
+  const [plan, setPlan] = useState<FxPlan | null>(null);
   const frameRef = useRef<{ p: FrameParams; camera?: [number, number][]; v: number }>({ p: { layout: "blur_fit", cam: null, z: 1, fx: 0, fy: 0 }, v: 0 });
-  const drawn = useRef({ t: -1, v: -1, w: 0 });
-  const [T, setT] = useState(0);
+  const drawn = useRef({ t: -1, v: -1, w: 0, el: 0 });
+  const Tref = useRef(0);
+  const [T, setT] = useState(0);       // only changes when the captions/hook/CTA on screen change
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(p.muted ?? false);
   const [W, setW] = useState(300);
@@ -99,17 +131,17 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   tlRef.current = tl;
   const D = tl.D;
 
-  const audioKey = p.withAudio ? JSON.stringify([clip.id, edits.trim, edits.cut, edits.fix, edits.hook, edits.audio, edits.style, edits.place]) : "";
+  const audioKey = p.withAudio ? JSON.stringify([clip.id, edits.trim, edits.cut, edits.fix, edits.hook, edits.audio, edits.style, edits.place, edits.zooms, edits.zoom_mult, edits.vibe]) : "";
   useEffect(() => {
     if (!p.withAudio) return;
     let live = true;
     const id = setTimeout(() => {
       setAudioBusy(true);
-      api<{ path: string }>("/api/clip/audio", { project: p.pid, clip: clip.id, edits })
-        .then((r) => { if (live) setAudioSrc(r.path ? mediaUrl(r.path) : ""); })
+      api<{ path: string; plan?: FxPlan }>("/api/clip/audio", { project: p.pid, clip: clip.id, edits })
+        .then((r) => { if (!live) return; setAudioSrc(r.path ? mediaUrl(r.path) : ""); if (r.plan) { setPlan(r.plan); p.onPlan?.(r.plan); } })
         .catch(() => { if (live) setAudioSrc(""); })
         .finally(() => live && setAudioBusy(false));
-    }, 700);
+    }, 450);
     return () => { live = false; clearTimeout(id); };
   }, [audioKey]);
 
@@ -123,25 +155,63 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
     return () => ro.disconnect();
   }, []);
 
+  const prepStandby = useCallback((next: number) => {
+    const t = tlRef.current;
+    const sb = vid(1 - act.current);
+    const g = t.segs[next];
+    if (!sb || !g) { prepped.current = -1; return; }
+    if (prepped.current === next && Math.abs(sb.currentTime - (g.a - off)) < 0.08) return;
+    prepped.current = next;
+    try { sb.pause(); sb.currentTime = Math.max(0, g.a - off); } catch { /* not loaded yet */ }
+  }, [off]);
+
   const seekAbsFor = useCallback((Tq: number) => {
     const t = tlRef.current;
     const i = segAt(t, Tq);
     const g = t.segs[i];
-    if (!g || !video.current) return;
+    const v = cur();
+    if (!g || !v) return;
     segIdx.current = i;
-    video.current.currentTime = Math.max(0, g.a + Math.max(0, Tq - g.t0) - off);
+    v.currentTime = Math.max(0, g.a + Math.max(0, Tq - g.t0) - off);
+    Tref.current = Tq;
     setT(Tq);
-  }, [off]);
+    publishTime(Tq);
+    prepStandby(i + 1 < t.segs.length ? i + 1 : 0);
+  }, [off, prepStandby]);
 
   // restart at the new first frame when the edit list changes
-  useEffect(() => { seekAbsFor(Math.min(T, Math.max(0, D - 0.1))); }, [tl]);
+  useEffect(() => { prepped.current = -1; seekAbsFor(Math.min(Tref.current, Math.max(0, D - 0.1))); }, [tl]);
 
-  // playback driver: jump over removed parts, loop at the end, draw the blurred background
+  // everything that changes every frame is written straight to the DOM (no React re-render)
+  const fxRef = useRef<{ motion: string; intro: string; wins: FocusWin[]; D: number; keyFn: (t: number) => string }>({ motion: "none", intro: "none", wins: [], D: 1, keyFn: () => "" });
+  const applyFrame = (Tn: number) => {
+    const f = fxRef.current;
+    const [z, dx, dy] = motionAt(f.motion, f.intro, f.wins, Tn, f.D);
+    const st = stageEl.current;
+    if (st) {
+      st.style.transform = `scale(${z}) translate(${-dx * 100}%, ${-dy * 100}%)`;
+      const io = introAt(f.intro, Tn);
+      if (cur()?.paused) { io.alpha = 0; io.rgb = false; }   // flashes only while playing (no white still frame)
+      const grade = st.dataset.grade || "";
+      st.style.filter = (grade + (io.rgb ? " drop-shadow(6px 0 rgba(255,0,60,.8)) drop-shadow(-6px 0 rgba(0,220,255,.8))" : "")).trim() || "";
+      const ie = introEl.current;
+      if (ie) { ie.style.opacity = String(io.alpha); if (io.color) ie.style.background = io.color; }
+    }
+    if (pbarEl.current) pbarEl.current.style.width = `${(Tn / Math.max(0.1, f.D)) * 100}%`;
+    if (rangeEl.current && document.activeElement !== rangeEl.current) {
+      rangeEl.current.value = String(Math.min(Tn, f.D));
+      rangeEl.current.style.setProperty("--p", `${(Tn / Math.max(0.1, f.D)) * 100}%`);
+    }
+    if (timeEl.current) timeEl.current.textContent = `${fmt(Tn)} / ${fmt(f.D)}`;
+  };
+
+  // playback driver: jump over removed parts (seamless swap), loop at the end, draw the frame
   useEffect(() => {
     let raf = 0;
-    let last = -1;
+    let lastKey = "";
+    let lastPub = -1;
     const tick = () => {
-      const v = video.current;
+      const v = cur();
       const t = tlRef.current;
       if (v && t.segs.length) {
         const abs = v.currentTime + off;
@@ -153,52 +223,69 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
           segIdx.current = i;
           g = t.segs[i];
         }
-        if (!v.paused && abs >= g.b - 0.03) {
-          if (i + 1 < t.segs.length) {
-            segIdx.current = i + 1;
-            v.currentTime = t.segs[i + 1].a - off;
-          } else if (p.loop !== false) {
-            segIdx.current = 0;
-            v.currentTime = t.segs[0].a - off;
-          } else {
+        const nextI = i + 1 < t.segs.length ? i + 1 : (p.loop !== false ? 0 : -1);
+        if (!v.paused && abs >= g.b - 0.035) {
+          const sb = vid(1 - act.current);
+          const ng = nextI >= 0 ? t.segs[nextI] : null;
+          if (!ng) {
             v.pause();
+          } else if (sb && prepped.current === nextI && sb.readyState >= 2 && !sb.seeking) {
+            // swap: the standby is already sitting on the next part's first frame
+            sb.muted = muted;
+            sb.play().catch(() => {});
+            v.pause();
+            v.muted = true;
+            act.current = 1 - act.current;
+            segIdx.current = nextI;
+            prepped.current = -1;
+            const after = nextI + 1 < t.segs.length ? nextI + 1 : 0;
+            setTimeout(() => prepStandby(after), 30);
+          } else {
+            segIdx.current = nextI;
+            v.currentTime = ng.a - off;
           }
+        } else if (prepped.current !== nextI && nextI >= 0 && !v.paused) {
+          prepStandby(nextI);
         }
-        const Tn = g.t0 + Math.max(0, Math.min(g.b, abs) - g.a);
+        const a = cur()!;
+        const gg = t.segs[segIdx.current];
+        const absA = a.currentTime + off;
+        const Tn = gg.t0 + Math.max(0, Math.min(gg.b, absA) - gg.a);
+        Tref.current = Tn;
         const au = audio.current;
         if (au && au.src) {
-          if (!v.paused) {
+          if (!a.paused) {
             if (au.paused) au.play().catch(() => {});
-            if (Math.abs(au.currentTime - Tn) > 0.12) au.currentTime = Tn;
+            if (Math.abs(au.currentTime - Tn) > 0.15) au.currentTime = Tn;
           } else if (!au.paused) au.pause();
         }
-        if (Math.abs(Tn - last) > 0.015) {
-          last = Tn;
-          setT(Tn);
-          p.onTime?.(Tn, t.D);
-        }
+        applyFrame(Tn);
+        const k = fxRef.current.keyFn(Tn);
+        if (k !== lastKey) { lastKey = k; setT(Tn); }
+        if (Math.abs(Tn - lastPub) > 0.04) { lastPub = Tn; publishTime(Tn); p.onTime?.(Tn, t.D); }
         const c = canvas.current;
         const fp = frameRef.current;
-        if (c && v.readyState >= 2 && (v.currentTime !== drawn.current.t || fp.v !== drawn.current.v || c.width !== drawn.current.w)) {
+        if (c && a.readyState >= 2 && (a.currentTime !== drawn.current.t || fp.v !== drawn.current.v || c.width !== drawn.current.w || act.current !== drawn.current.el)) {
           const ctx = c.getContext("2d");
           const camLay = ["smart_crop", "split", "split_reverse", "zoom45", "square"].includes(fp.p.layout);
-          const cam = camLay ? cameraAt(fp.camera, abs) : null;
-          if (ctx) try { drawLayout(ctx, v, c.width, c.height, { ...fp.p, cam }); drawn.current = { t: v.currentTime, v: fp.v, w: c.width }; } catch { /* not ready */ }
+          const cam = camLay ? cameraAt(fp.camera, absA) : null;
+          if (ctx) try { drawLayout(ctx, a, c.width, c.height, { ...fp.p, cam }); drawn.current = { t: a.currentTime, v: fp.v, w: c.width, el: act.current }; } catch { /* not ready */ }
         }
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [off, p.loop]);
+  }, [off, p.loop, muted, prepStandby]);
 
+  const playPause = () => { const v = cur(); if (!v) return; if (v.paused) v.play().catch(() => {}); else v.pause(); };
   useImperativeHandle(ref, () => ({
     seek: (x) => seekAbsFor(Math.max(0, Math.min(x, D - 0.05))),
-    play: () => { video.current?.play().catch(() => {}); },
-    pause: () => video.current?.pause(),
-    toggle: () => { const v = video.current; if (!v) return; if (v.paused) v.play().catch(() => {}); else v.pause(); },
-    time: () => T,
-  }), [seekAbsFor, D, T]);
+    play: () => { cur()?.play().catch(() => {}); },
+    pause: () => cur()?.pause(),
+    toggle: playPause,
+    time: () => Tref.current,
+  }), [seekAbsFor, D]);
 
   // ------------------------------------------------------------------ framing
   const [sw, sh] = p.srcWH || [1920, 1080];
@@ -212,7 +299,10 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   const z = Math.min(2, Math.max(1, place.frame_zoom ?? 1));
   const fx = Math.min(1, Math.max(-1, place.frame_x ?? 0));
   const fy = Math.min(1, Math.max(-1, place.frame_y ?? 0));
-  const [mz, mdx, mdy] = motionZoom(style.motion, T, D);
+  // the vibe engine's resolved choices (from the server) — "auto" looks follow them exactly like the export
+  const motion = style.motion === "auto" ? (plan?.motion || "none") : style.motion;
+  const intro = style.intro === "auto" ? (plan?.intro || "none") : style.intro;
+  const gradeKey = style.color_grade === "auto" ? (plan?.grade || "none") : style.color_grade;
   const H = (W * 16) / 9;
   const fpKey = `${layout}|${z}|${fx}|${fy}|${(p.camera || clip.camera || []).length}`;
   if (frameRef.current.p.layout + "|" + frameRef.current.p.z + "|" + frameRef.current.p.fx + "|" + frameRef.current.p.fy + "|" + (frameRef.current.camera || []).length !== fpKey) {
@@ -220,64 +310,112 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   }
   const dpr = Math.min(1.5, typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1);
   const k = W / 1080;
-  const grade = GRADE_CSS[style.color_grade] ?? "";
+  const grade = GRADE_CSS[gradeKey] ?? "";
 
   // ------------------------------------------------------------------ captions
   const cap: CapStyle | undefined = catalog?.captions[style.caption_style];
   const chunks = useMemo(() => cap ? chunkWords(tl.words, cap.chunk, cap.maxchars) : [], [tl, cap]);
-  let capEl: React.ReactNode = null;
-  if (cap && chunks.length) {
-    let ci = -1;
+  const chunkAt = (t: number) => {
     for (let i = 0; i < chunks.length; i++) {
       const ch = chunks[i];
       const nxt = i + 1 < chunks.length ? chunks[i + 1][0].T : D;
       let ce = Math.min(nxt, ch[ch.length - 1].TE + 0.6);
       if (nxt - ch[ch.length - 1].TE < 0.3) ce = nxt;
-      if (T >= ch[0].T && T < ce) { ci = i; break; }
+      if (t >= ch[0].T && t < ce) return i;
     }
+    return -1;
+  };
+  const hookKey0 = style.hook_style;
+  const hook0: HookStyle | undefined = hookKey0 ? catalog?.hooks[hookKey0] : undefined;
+  const hookEnd = hook0 ? Math.min(D, place.hook_dur ? Math.max(1, place.hook_dur) : hook0.dur || D) : 0;
+  const wins = useMemo(() => focusWindows((plan?.punches || []) as [number, number][], D), [plan, D]);
+  // what's on screen at time t: re-render only when this changes (word by word), not every frame
+  fxRef.current = {
+    motion, intro, wins, D,
+    keyFn: (t: number) => {
+      const ci = chunkAt(t);
+      const ch = ci >= 0 ? chunks[ci] : null;
+      const ai = ch ? ch.findIndex((w) => t >= w.T && t < w.TE + 0.02) : -1;
+      const sp = ch ? ch.filter((w) => t >= w.T).length : 0;
+      return `${ci}|${ai}|${sp}|${t < hookEnd ? 1 : 0}|${t >= D - 2.6 ? 1 : 0}`;
+    },
+  };
+  const emph = useMemo(() => new Set(plan?.emphasis || []), [plan]);
+  let capEl: React.ReactNode = null;
+  if (cap && chunks.length) {
+    const ci = chunkAt(T);
     if (ci >= 0) {
       const ch = chunks[ci];
       const toks = ch.map((w) => cleanWord(w.w, cap.upper));
       const capScale = Math.min(1.6, Math.max(0.5, place.cap_scale ?? 1));
-      const size = fitSize(cap.font, toks.join(" "), cap.size * capScale, cap) * k;
-      const y = (place.cap_y ?? POS[style.position] ?? 0.7) * H;
-      const stroke = cap.bord * k * 1.6;
+      const size0 = Math.floor(cap.size * capScale);
+      // same size / two-line decision as the export (captions.build_captions)
+      let fs = fitSize(cap.font, toks.join(" "), size0, cap);
+      let split = -1;
+      if (toks.length >= 3 && fs < size0 * 0.85) {
+        let best: [number, number] | null = null;
+        for (let j = 1; j < toks.length; j++) {
+          const f2 = Math.min(fitSize(cap.font, toks.slice(0, j).join(" "), size0, cap), fitSize(cap.font, toks.slice(j).join(" "), size0, cap));
+          if (!best || f2 > best[0]) best = [f2, j];
+        }
+        if (best && best[0] > fs * 1.15) { fs = best[0]; split = best[1]; }
+      }
+      const em = emOf(cap.font);
+      const px = fs * k;                          // ASS size in preview pixels
+      const y = (place.cap_y != null ? Math.min(1790, Math.max(140, place.cap_y * 1920)) / 1920 : POS[style.position] ?? 0.7) * H;
+      const stroke = cap.bord * k * 2;
       const shadow = cap.shadow ? `${cap.shadow * k}px ${cap.shadow * k}px 0 rgba(0,0,0,.55)` : "none";
       const glow = cap.glow ? `, 0 0 ${14 * k}px ${cap.glow}, 0 0 ${28 * k}px ${cap.glow}` : "";
       const activeIdx = ch.findIndex((w) => T >= w.T && T < w.TE + 0.02);
+      const space = (METRICS[cap.font]?.w[" "] ?? 0.25) * px;
+      const act = cap.active || "#FFE400";
       const words = toks.map((t, j) => {
         const w = ch[j];
         const spoken = T >= w.T;
         const active = j === activeIdx || (activeIdx < 0 && j === ch.length - 1 && T >= w.T);
         let color = cap.primary;
-        let bg: string | undefined;
+        let hl: string | undefined;
         let hidden = false;
-        let fill = cap.primary;
-        if (cap.mode === "active") { if (active) { color = cap.active || cap.primary; if (cap.hl_box) { bg = cap.hl_box; color = cap.primary; } } }
-        else if (cap.mode === "karaoke") color = spoken ? cap.primary : cap.secondary || "#fff";
-        else if (cap.mode === "typewriter") { hidden = !spoken; if (active) color = cap.active || cap.primary; }
-        else if (cap.mode === "oneword") { color = (cap.palette || [cap.primary])[(ci) % (cap.palette?.length || 1)]; }
-        else if (cap.mode === "hollow") { fill = active ? cap.primary : "transparent"; color = fill; }
+        let scale = 1;
+        if (cap.mode === "karaoke") color = spoken ? cap.primary : cap.secondary || "#fff";
+        else if (cap.mode === "typewriter" && !spoken) hidden = true;
+        if (cap.mode === "oneword") {
+          color = cap.palette?.length ? cap.palette[(ci + j) % cap.palette.length] : cap.primary;
+          if (isEmph(w.w, emph)) color = "#FFE400";
+        } else if (active && (cap.mode === "active" || cap.mode === "typewriter")) {
+          color = act;
+          if (cap.hl_box) hl = cap.hl_box;
+        } else if (active && cap.mode === "hollow") {
+          color = cap.primary;
+        } else if (cap.emph && isEmph(w.w, emph) && !hidden) {
+          color = cap.emph;
+          if (!cap.box && !cap.hl_box) scale = 1.12;
+        }
+        const fill = cap.mode === "hollow" ? (active ? cap.primary : "transparent") : color;
         const pop = active && (cap.pop || cap.bounce);
         return (
-          <span key={j + ":" + ci} className={`cw ${pop ? "cw-pop" : ""}`} style={{
-            color, visibility: hidden ? "hidden" : undefined, background: bg,
-            padding: bg ? `0 ${10 * k}px` : undefined, borderRadius: bg ? 8 * k : undefined,
-            WebkitTextStroke: cap.mode === "hollow" ? `${stroke}px ${cap.outline}` : undefined,
-          }}>{t}</span>
+          <React.Fragment key={j + ":" + ci}>
+            {j === split && <br />}
+            <span className={`cw ${pop ? "cw-pop" : ""}`} style={{
+              color: fill, visibility: hidden ? "hidden" : undefined, marginLeft: j && j !== split ? space : 0,
+              background: hl, boxShadow: hl ? `0 0 0 ${16 * k}px ${hl}` : undefined,
+              transform: scale !== 1 ? `scale(${scale})` : undefined,
+              WebkitTextStroke: cap.mode === "hollow" ? `${stroke}px ${cap.outline}` : undefined,
+            }}>{t}</span>
+          </React.Fragment>
         );
       });
       const shown = cap.mode === "oneword" ? [words[Math.max(0, activeIdx)]] : words;
+      const tilt = cap.tilt ? (plan?.tilts?.[ci] ?? (ci % 2 ? 2 : -2)) : 0;
       capEl = (
-        <div className={`cap ${cap.box ? "cap-box" : ""} ${cap.slide ? "cap-slide" : ""}`} key={"c" + ci} style={{
-          top: y, fontFamily: `"${cap.font}", Impact, sans-serif`, fontSize: size, lineHeight: 1.08,
+        <div className={`cap ${cap.box ? "cap-box" : ""} ${cap.slide ? "cap-slide" : ""} ${cap.fade ? "cap-fade" : ""}`} key={"c" + ci} style={{
+          top: y, fontFamily: `"${cap.font}", Impact, sans-serif`, fontSize: px * em, lineHeight: `${px}px`, whiteSpace: "nowrap", maxWidth: "none",
           WebkitTextStroke: cap.box || cap.mode === "hollow" ? undefined : `${stroke}px ${cap.outline}`,
           textShadow: cap.box ? "none" : shadow + glow,
           background: cap.box ? hexA(cap.outline, 1 - (cap.box_alpha ?? 0)) : undefined,
-          padding: cap.box ? `${cap.bord * k * 0.6}px ${cap.bord * k}px` : undefined,
-          borderRadius: cap.box ? 10 * k : undefined,
-          transform: `translate(-50%, -50%) rotate(${cap.tilt ? (ci % 2 ? 2 : -2) : 0}deg)`,
-          opacity: cap.fade ? Math.min(1, (T - ch[0].T) / 0.15) : 1,
+          padding: cap.box ? `${cap.bord * k}px` : undefined,
+          borderRadius: cap.box ? 3 * k : undefined,
+          transform: `translate(-50%, -50%) translateY(${dyOf(cap.font) * px}px) rotate(${-tilt}deg)`,
         }}>{shown}</div>
       );
     }
@@ -291,19 +429,28 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   if (hook && hookText) {
     const dur = place.hook_dur ? Math.max(1, place.hook_dur) : hook.dur || D;
     if (T < Math.min(D, dur)) {
+      // same wrapping + shrinking as captions.build_hook: up to 3 lines, 880 px wide
       const hs = Math.min(1.6, Math.max(0.5, place.hook_scale ?? 1));
-      const size = hook.size * hs * k;
-      const y = (place.hook_y ?? hook.y / 1920) * H;
-      const outline = hook.outline ? `${(hook.bord || 6) * k * 1.6}px ${hook.outline}` : undefined;
+      const txt = hook.upper ? hookText.toUpperCase() : hookText;
+      let size = Math.floor(hook.size * hs);
+      let lines = wrapMeasured(hook.font, txt, size, 3, 880);
+      while (!lines && size > 40) { size = Math.floor(size * 0.9); lines = wrapMeasured(hook.font, txt, size, 3, 900); }
+      if (!lines) lines = [txt];
+      const yy = place.hook_y != null ? Math.min(1790, Math.max(140, place.hook_y * 1920)) : hook.y - 10 + ((lines.length - 1) * size) / 2;
+      const px = size * k;
+      const em = emOf(hook.font);
+      const outline = hook.outline ? `${(hook.bord || 6) * k * 2}px ${hook.outline}` : undefined;
+      const boxBg = hook.box ? hexA(hook.box, 1 - (hook.box_alpha ?? 0)) : undefined;
       hookEl = (
         <div className={`hook anim-${hook.anim}`} style={{
-          top: y, fontFamily: `"${hook.font}", Impact, sans-serif`, fontSize: size, color: hook.color,
-          background: hook.box ? hexA(hook.box, 1 - (hook.box_alpha ?? 0)) : undefined,
-          padding: hook.box ? `${14 * k}px ${22 * k}px` : undefined, WebkitTextStroke: hook.box ? undefined : outline,
-          textShadow: hook.glow ? `0 0 ${16 * k}px ${hook.glow}, 0 0 ${30 * k}px ${hook.glow}` : hook.box ? "none" : `0 ${4 * k}px 0 rgba(0,0,0,.5)`,
-          maxWidth: 880 * k, textTransform: hook.upper ? "uppercase" : "none",
-          transform: `translate(-50%, -50%) rotate(${hook.tilt || 0}deg)`,
-        }}>{hookText}</div>
+          top: (yy / 1920) * H, fontFamily: `"${hook.font}", Impact, sans-serif`, fontSize: px * em, lineHeight: `${px}px`, color: hook.color,
+          WebkitTextStroke: hook.box ? undefined : outline, whiteSpace: "nowrap",
+          textShadow: hook.glow ? `0 0 ${16 * k}px ${hook.glow}, 0 0 ${30 * k}px ${hook.glow}` : hook.box ? "none" : `${4 * k}px ${4 * k}px 0 rgba(0,0,0,.55)`,
+          transform: `translate(-50%, -50%) translateY(${dyOf(hook.font) * px}px) rotate(${-(hook.tilt || 0)}deg)`,
+        }}>{lines.map((l, i) => (
+          <React.Fragment key={i}>{i > 0 && <br />}
+            <span style={boxBg ? { background: boxBg, boxShadow: `0 0 0 ${20 * k}px ${boxBg}` } : undefined}>{l}</span>
+          </React.Fragment>))}</div>
       );
     }
   }
@@ -311,22 +458,17 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   const ctaText = settings.cta_text || "";
   const ctaEl = cta && ctaText.trim() && D >= 8 && T >= D - 2.6 ? (
     <div className={`cta anim-${cta.anim}`} style={{
-      top: (place.cta_y ?? 0.42) * H, fontFamily: `"${cta.font}", sans-serif`, fontSize: cta.size * k, color: cta.color,
-      background: cta.box, padding: cta.box ? `${10 * k}px ${22 * k}px` : undefined, borderRadius: cta.box ? 999 : undefined,
-      WebkitTextStroke: cta.outline ? `${(cta.bord || 5) * k * 1.4}px ${cta.outline}` : undefined,
+      top: (place.cta_y != null ? Math.min(1790, Math.max(140, place.cta_y * 1920)) / 1920 : 0.42) * H,
+      fontFamily: `"${cta.font}", sans-serif`, fontSize: cta.size * k * emOf(cta.font), lineHeight: `${cta.size * k}px`, color: cta.color,
+      background: cta.box, boxShadow: cta.box ? `0 0 0 ${18 * k}px ${cta.box}` : undefined,
+      WebkitTextStroke: cta.outline ? `${(cta.bord || 5) * k * 2}px ${cta.outline}` : undefined,
+      textShadow: cta.box ? "none" : `${3 * k}px ${3 * k}px 0 rgba(0,0,0,.55)`,
       textTransform: cta.font !== "Poppins" ? "uppercase" : "none",
+      transform: `translate(-50%, -50%) translateY(${dyOf(cta.font) * cta.size * k}px)`,
     }}>{ctaText}</div>
   ) : null;
   const wm = settings.watermark?.trim();
   const wmPos = place.wm_pos || "top";
-
-  // intro effects
-  let introEl: React.ReactNode = null;
-  let shake = "";
-  if (style.intro === "flash" && T < 0.3 && playing) introEl = <div className="intro" style={{ background: "#fff", opacity: 1 - T / 0.3 }} />;
-  if (style.intro === "fade_white" && T < 0.7 && playing) introEl = <div className="intro" style={{ background: "#fff", opacity: 1 - T / 0.7 }} />;
-  if (style.intro === "fade_black" && T < 0.5 && playing) introEl = <div className="intro" style={{ background: "#000", opacity: 1 - T / 0.5 }} />;
-  if (style.intro === "shake" && T < 0.45) shake = `translate(${16 * k * Math.sin(T * 95)}px, ${12 * k * Math.cos(T * 83)}px)`;
 
   const accent = cap?.active || cap?.primary || "#FFE400";
   const src = mediaUrl(media.file);
@@ -339,23 +481,30 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
       .finally(() => setMaking(false));
   };
 
+  const isCur = (e: React.SyntheticEvent<HTMLVideoElement>) => e.currentTarget === cur();
+  useEffect(() => { const v = cur(); if (v) v.muted = muted; }, [muted]);
+  useEffect(() => { applyFrame(Tref.current); });
+
   return (
     <div className={`player ${p.fill ? "player-fill" : ""} ${p.className || ""}`} ref={box}
-      onClick={() => p.controls && (video.current?.paused ? video.current.play().catch(() => {}) : video.current?.pause())}>
-      <div className="stage" style={{ height: H, transform: `${shake} scale(${mz}) translate(${-mdx * 100}%, ${-mdy * 100}%)`, filter: grade || undefined }}>
+      onClick={() => p.controls && playPause()}>
+      <div className="stage" ref={stageEl} data-grade={grade} style={{ height: H }}>
         <canvas ref={canvas} width={Math.round(W * dpr)} height={Math.round(H * dpr)} className="frame-canvas" />
-        <video ref={video} src={src} className="hidden-video" playsInline muted={muted} preload="auto" autoPlay={p.autoPlay}
+        <video ref={vA} src={src} className="hidden-video" playsInline muted={muted} preload="auto" autoPlay={p.autoPlay}
           poster={clip.poster ? mediaUrl(clip.poster) : undefined}
-          onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
+          onPlay={(e) => isCur(e) && setPlaying(true)} onPause={(e) => isCur(e) && setPlaying(false)}
           onError={onVideoError}
-          onLoadedMetadata={() => seekAbsFor(T)} />
-        {VIGNETTE.has(style.color_grade) && <div className="vignette" />}
+          onLoadedMetadata={(e) => { if (isCur(e)) seekAbsFor(Tref.current); }} />
+        <video ref={vB} src={src} className="hidden-video" playsInline muted preload="auto"
+          onPlay={(e) => isCur(e) && setPlaying(true)} onPause={(e) => isCur(e) && setPlaying(false)}
+          onLoadedMetadata={() => { prepped.current = -1; }} />
+        {VIGNETTE.has(gradeKey) && <div className="vignette" />}
       </div>
       <div className="overlay">
         {hookEl}{capEl}{ctaEl}
-        {wm && <div className={`wm wm-${wmPos}`} style={{ fontSize: 40 * k * (place.wm_scale ?? 1) }}>{wm}</div>}
-        {settings.progress_bar !== false && <div className="pbar" style={{ width: `${(T / Math.max(0.1, D)) * 100}%`, background: accent, height: Math.max(3, 10 * k) }} />}
-        {introEl}
+        {wm && <div className={`wm wm-${wmPos}`} style={{ fontSize: 40 * k * Math.min(1.6, Math.max(0.5, place.wm_scale ?? 1)) * emOf("Poppins"), lineHeight: `${40 * k * Math.min(1.6, Math.max(0.5, place.wm_scale ?? 1))}px` }}>{wm}</div>}
+        {settings.progress_bar !== false && <div className="pbar" ref={pbarEl} style={{ background: accent, height: Math.max(2, 12 * k) }} />}
+        <div className="intro" ref={introEl} style={{ opacity: 0 }} />
       </div>
       {p.withAudio && <audio ref={audio} src={audioSrc || undefined} muted={muted} preload="auto" />}
       {p.withAudio && audioBusy && p.controls && <div className="aud-busy" title="Updating sound effects and music"><span className="spin" /></div>}
@@ -363,12 +512,12 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
       {making && <div className="player-err"><span className="spin" /> Preparing a preview copy of this video…</div>}
       {p.controls && (
         <div className="pctl" onClick={(e) => e.stopPropagation()}>
-          <button className="pbtn" onClick={() => video.current?.paused ? video.current.play().catch(() => {}) : video.current?.pause()}>
+          <button className="pbtn" onClick={playPause}>
             <Icon name={playing ? "pause" : "play"} size={16} />
           </button>
-          <input type="range" min={0} max={D} step={0.01} value={Math.min(T, D)} onChange={(e) => seekAbsFor(parseFloat(e.target.value))}
-            style={{ ["--p" as any]: `${(T / Math.max(0.1, D)) * 100}%` }} />
-          <span className="ptime">{fmt(T)} / {fmt(D)}</span>
+          <input ref={rangeEl} type="range" min={0} max={D} step={0.01} defaultValue={0}
+            onInput={(e) => seekAbsFor(parseFloat((e.target as HTMLInputElement).value))} />
+          <span className="ptime" ref={timeEl}>{fmt(T)} / {fmt(D)}</span>
           <button className="pbtn" onClick={() => setMuted(!muted)} title={muted ? "Unmute" : "Mute"}><Icon name="volume" size={15} /></button>
         </div>
       )}

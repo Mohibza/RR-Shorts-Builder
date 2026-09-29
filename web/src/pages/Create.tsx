@@ -98,6 +98,7 @@ export function CreatePage() {
           <Field label="Length"><Seg value={lk} options={LENGTHS} onChange={(v) => { const [a, b] = LEN_VALUES[v]; set({ min_duration: a, max_duration: b }); }} /></Field>
           <Field label="Captions"><Select value={s.caption_lang || "roman"} options={CAPTION_LANGS} onChange={(v) => set({ caption_lang: v })} /></Field>
           <Field label="Sound effects"><Seg value={s.sfx_level || "auto"} options={[["auto", "Auto"], ["off", "Off"], ["subtle", "Subtle"], ["medium", "Energetic"], ["high", "Max"]]} onChange={(v) => set({ sfx_level: v })} /></Field>
+          <Field label="Sound pack" hint="Auto picks the pack from each clip's vibe (hype, emotional, funny…)."><Select value={s.sfx_pack || "auto"} options={Object.entries(cat?.sfx_packs || { auto: "Auto" }) as [string, string][]} onChange={(v) => set({ sfx_pack: v })} /></Field>
           <Field label="Music"><div className="row gap"><Toggle on={!!s.add_music} onChange={(v) => set({ add_music: v })} /><button className="linkbtn" onClick={() => go("music")}>Choose tracks</button></div></Field>
           <button className="adv-btn" onClick={() => setAdv(!adv)}><Icon name="sliders" size={16} /> Advanced <Icon name={adv ? "down" : "right"} size={14} /></button>
         </section>
@@ -154,7 +155,7 @@ function Recent() {
 function PackSwatch({ pack, set }: { pack: string; set: Record<string, string> }) {
   const cat = useStore((x) => x.catalog);
   const cap = cat?.captions[set.caption_style];
-  const word = pack === "mix" ? "MIX" : "VIRAL";
+  const word = pack === "mix" ? "MIX" : pack === "vibe" ? "VIBE" : "VIRAL";
   return (
     <div className={`swatch sw-${pack}`}>
       <span style={cap ? { fontFamily: `"${cap.font}"`, color: cap.active || cap.primary, WebkitTextStroke: `1.5px ${cap.outline}`,

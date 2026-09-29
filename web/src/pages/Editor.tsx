@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api, get, mediaUrl } from "../lib/api";
 import { setState, toast, useStore } from "../lib/store";
 import { absAt, baseParts, buildTimeline, fmt } from "../lib/timeline";
+import { playTime, usePlayTime } from "../lib/playtime";
+import type { FxPlan } from "../components/ClipPlayer";
 import type { Clip, Edits, Place, Project, Style } from "../lib/types";
 import { Icon } from "../components/Icon";
 import { ClipPlayer, type PlayerHandle } from "../components/ClipPlayer";
@@ -13,7 +15,7 @@ import { Steps } from "./Create";
 const FILLERS = new Set(["um", "uh", "umm", "uhh", "erm", "hmm", "mm", "ah", "like", "basically", "actually", "literally",
   "so", "matlab", "yaani", "yani", "haan", "acha", "achha", "wo", "woh"]);
 const TABS: [string, string, string][] = [["transcript", "Transcript", "scissors"], ["style", "Style", "wand"],
-  ["text", "Text", "type"], ["audio", "Audio", "volume"], ["layout", "Layout", "layout"]];
+  ["vibe", "Vibe & FX", "spark"], ["text", "Text", "type"], ["audio", "Audio", "volume"], ["layout", "Layout", "layout"]];
 
 export function Editor({ pid, cid }: { pid: string; cid: string }) {
   const { project: p, err } = useProject(pid);
@@ -30,7 +32,7 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
   const [edits, setEdits] = useState<Edits>(() => JSON.parse(JSON.stringify(c.edits || {})));
   const [hist, setHist] = useState<Edits[]>([]);
   const [tab, setTab] = useState("transcript");
-  const [T, setT] = useState(0);
+  const [plan, setPlan] = useState<FxPlan | null>(null);
   const [frame, setFrame] = useState<string>("");
   const [frameBusy, setFrameBusy] = useState(false);
   const [post, setPost] = useState<string | null>(null);
@@ -85,7 +87,7 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
   const exact = async () => {
     setFrameBusy(true);
     try {
-      const r = await api<{ path: string }>("/api/clip/frame", { project: p.id, clip: c.id, edits, t: T });
+      const r = await api<{ path: string }>("/api/clip/frame", { project: p.id, clip: c.id, edits, t: player.current?.time() ?? playTime() });
       setFrame(mediaUrl(r.path, Date.now()));
     } catch (e: any) { toast(e.message, "error"); }
     setFrameBusy(false);
@@ -115,20 +117,21 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
           <div className="ed-player">
             <ClipPlayer ref={player} clip={c} pid={p.id} edits={edits} style={style} catalog={cat} settings={settings} controls
               camera={c.camera} framing={c.framing} srcWH={[p.info.width, p.info.height]} hookText={hookText}
-              onTime={(t) => setT(t)} fill withAudio />
+              onPlan={setPlan} fill withAudio />
             {frame && <div className="exact" onClick={() => setFrame("")}><img src={frame} alt="Exact frame" /><span className="chip dark"><Icon name="frame" size={13} /> Exact frame · click to go back to live</span></div>}
           </div>
-          <TrimBar c={c} edits={edits} T={T} tl={tl} onTrim={(tr) => change((e) => ({ ...e, trim: tr }))} onSeek={(t) => player.current?.seek(t)} />
+          <TrimBar c={c} edits={edits} tl={tl} plan={plan} onTrim={(tr) => change((e) => ({ ...e, trim: tr }))} onSeek={(t) => player.current?.seek(t)} />
         </div>
         <div className="ed-right glass depth">
           <div className="tabs">
             {TABS.map(([k, l, ic]) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}><Icon name={ic} size={16} />{l}</button>)}
           </div>
           <div className="tab-body scroll">
-            {tab === "transcript" && <TranscriptTab c={c} edits={edits} change={change} T={T} tl={tl} seek={(t) => player.current?.seek(t)} />}
+            {tab === "transcript" && <TranscriptTab c={c} edits={edits} change={change} tl={tl} seek={(t) => player.current?.seek(t)} />}
             {tab === "style" && <StyleTab style={style} change={change} />}
+            {tab === "vibe" && <VibeTab c={c} edits={edits} change={change} style={style} plan={plan} tl={tl} seek={(t) => player.current?.seek(t)} />}
             {tab === "text" && <TextTab c={c} edits={edits} change={change} style={style} />}
-            {tab === "audio" && <AudioTab edits={edits} change={change} />}
+            {tab === "audio" && <AudioTab edits={edits} change={change} plan={plan} />}
             {tab === "layout" && <LayoutTab style={style} change={change} landscape={p.info.width > p.info.height * 0.8} />}
           </div>
         </div>
@@ -140,7 +143,7 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
 }
 
 // ------------------------------------------------------------------ trim bar
-function TrimBar({ c, edits, T, tl, onTrim, onSeek }: { c: Clip; edits: Edits; T: number; tl: ReturnType<typeof buildTimeline>; onTrim: (t: [number, number]) => void; onSeek: (T: number) => void }) {
+function TrimBar({ c, edits, tl, plan, onTrim, onSeek }: { c: Clip; edits: Edits; tl: ReturnType<typeof buildTimeline>; plan: FxPlan | null; onTrim: (t: [number, number]) => void; onSeek: (T: number) => void }) {
   const parts = baseParts(c);
   const L = parts.reduce((x, [a, b]) => x + b - a, 0);
   const bar = useRef<HTMLDivElement>(null);
@@ -161,7 +164,6 @@ function TrimBar({ c, edits, T, tl, onTrim, onSeek }: { c: Clip; edits: Edits; T
     for (const g of tl.segs) { if (abs < g.b) return g.t0 + Math.max(0, abs - g.a); }
     return tl.D;
   };
-  const head = baseOf(absAt(tl, T));
   const x2t = (clientX: number) => {
     const r = bar.current!.getBoundingClientRect();
     return Math.max(0, Math.min(L, ((clientX - r.left) / r.width) * L));
@@ -195,14 +197,20 @@ function TrimBar({ c, edits, T, tl, onTrim, onSeek }: { c: Clip; edits: Edits; T
         <div className="trim-out" style={{ left: `${(tr[1] / L) * 100}%`, right: 0 }} />
         <div className="trim-h" data-h="1" style={{ left: `${(tr[0] / L) * 100}%` }} onMouseDown={() => setDrag(0)} />
         <div className="trim-h r" data-h="1" style={{ left: `${(tr[1] / L) * 100}%` }} onMouseDown={() => setDrag(1)} />
-        <div className="playhead" style={{ left: `${(head / L) * 100}%` }} />
+        {(plan?.punches || []).map(([t], i) => <span key={"z" + i} className="zoom-mark" title={`Focus zoom at ${fmt(t)}`} style={{ left: `${(baseOf(absAt(tl, t)) / L) * 100}%` }} />)}
+        <Playhead tl={tl} L={L} baseOf={baseOf} />
       </div>
     </div>
   );
 }
 
+function Playhead({ tl, L, baseOf }: { tl: ReturnType<typeof buildTimeline>; L: number; baseOf: (abs: number) => number }) {
+  const t = usePlayTime((x) => Math.round(x * 30) / 30);
+  return <div className="playhead" style={{ left: `${(baseOf(absAt(tl, t)) / L) * 100}%` }} />;
+}
+
 // ------------------------------------------------------------------ transcript: click to seek, select to remove
-function TranscriptTab({ c, edits, change, T, tl, seek }: { c: Clip; edits: Edits; change: (f: (e: Edits) => Edits) => void; T: number; tl: ReturnType<typeof buildTimeline>; seek: (T: number) => void }) {
+function TranscriptTab({ c, edits, change, tl, seek }: { c: Clip; edits: Edits; change: (f: (e: Edits) => Edits) => void; tl: ReturnType<typeof buildTimeline>; seek: (T: number) => void }) {
   const words = c.words || [];
   const cut = new Set(edits.cut || []);
   const fix = edits.fix || {};
@@ -211,7 +219,7 @@ function TranscriptTab({ c, edits, change, T, tl, seek }: { c: Clip; edits: Edit
   const [val, setVal] = useState("");
   const parts = baseParts(c);
   const inClip = (w: { s: number; e: number }) => parts.some(([a, b]) => w.s >= a - 0.05 && w.e <= b + 0.3);
-  const playing = tl.words.find((w) => T >= w.T && T < w.TE)?.i;
+  const playing = usePlayTime((T) => tl.words.find((w) => T >= w.T && T < w.TE)?.i ?? -1);
   const Tof = (i: number) => tl.words.find((w) => w.i === i)?.T;
   const range = sel ? [Math.min(...sel), Math.max(...sel)] : null;
   const selIdx = range ? words.map((_, i) => i).filter((i) => i >= range[0] && i <= range[1]) : [];
@@ -354,14 +362,17 @@ function StyleTab({ style, change }: { style: Style; change: (f: (e: Edits) => E
       {sub === "look" && (<>
         <div className="sec-head"><h3>Colour</h3></div>
         <div className="chips-row">
+          <button className={`chipbtn ${style.color_grade === "auto" ? "on" : ""}`} onClick={() => set({ color_grade: "auto" })}><Icon name="spark" size={12} /> Auto (vibe)</button>
           {Object.entries(cat.grades).map(([k, g]) => <button key={k} className={`chipbtn grade g-${k} ${style.color_grade === k ? "on" : ""}`} onClick={() => set({ color_grade: k })}><i />{g.name}</button>)}
         </div>
         <div className="sec-head"><h3>Camera motion</h3></div>
         <div className="chips-row">
+          <button className={`chipbtn ${style.motion === "auto" ? "on" : ""}`} onClick={() => set({ motion: "auto" })}><Icon name="spark" size={12} /> Auto (vibe)</button>
           {Object.entries(cat.motions).map(([k, n]) => <button key={k} className={`chipbtn ${style.motion === k ? "on" : ""}`} onClick={() => set({ motion: k })}>{n}</button>)}
         </div>
         <div className="sec-head"><h3>Intro</h3></div>
         <div className="chips-row">
+          <button className={`chipbtn ${style.intro === "auto" ? "on" : ""}`} onClick={() => set({ intro: "auto" })}><Icon name="spark" size={12} /> Auto (vibe)</button>
           {Object.entries(cat.intros).map(([k, n]) => <button key={k} className={`chipbtn ${style.intro === k ? "on" : ""}`} onClick={() => set({ intro: k })}>{n}</button>)}
         </div>
       </>)}
@@ -401,9 +412,10 @@ function TextTab({ c, edits, change, style }: { c: Clip; edits: Edits; change: (
 }
 
 // ------------------------------------------------------------------ audio
-function AudioTab({ edits, change }: { edits: Edits; change: (f: (e: Edits) => Edits) => void }) {
+function AudioTab({ edits, change, plan }: { edits: Edits; change: (f: (e: Edits) => Edits) => void; plan: FxPlan | null }) {
   const [lib, setLib] = useState<any>(null);
   const settings = useStore((s) => s.settings);
+  const cat = useStore((s) => s.catalog);
   const audio = edits.audio || {};
   const music = audio.music ?? (settings.add_music ? "auto" : "none");
   const [play, setPlay] = useState("");
@@ -411,11 +423,25 @@ function AudioTab({ edits, change }: { edits: Edits; change: (f: (e: Edits) => E
   useEffect(() => { get("/api/music").then(setLib).catch(() => {}); }, []);
   const set = (patch: Edits["audio"]) => change((e) => ({ ...e, audio: { ...(e.audio || {}), ...patch } }));
   useEffect(() => { if (aud.current) { if (play) aud.current.play().catch(() => {}); else aud.current.pause(); } }, [play]);
+  const vibes = cat?.vibes || {};
+  const packs = cat?.sfx_packs || {};
   return (
     <div className="audio-tab">
-      <div className="sec-head"><h3>Background music</h3></div>
-      <Seg value={music === "auto" || music === "none" ? music : "pick"} options={[["auto", "Auto pick"], ["none", "No music"], ["pick", "Choose track"]]}
-        onChange={(v) => set({ music: v === "pick" ? (lib?.tracks?.[0]?.path || "auto") : v })} />
+      <div className="sec-head"><h3>Background music</h3>
+        <Btn small kind="ghost" icon="refresh" onClick={() => set({ seed: (audio.seed || 0) + 1 })} title="Pick a different matching track and new sound variations">Shuffle</Btn></div>
+      <Seg value={music === "auto" || music === "none" ? music : "pick"} options={[["auto", "Auto (fits the vibe)"], ["none", "No music"], ["pick", "Choose track"]]}
+        onChange={(v) => set({ music: v === "pick" ? (plan?.music || lib?.tracks?.[0]?.path || "auto") : v, music_offset: null })} />
+      {music === "auto" && (
+        <div className="auto-pick glass-2">
+          <Icon name="music" size={16} />
+          <div className="grow"><b>{plan?.music_name || (settings.add_music ? "Choosing…" : "Music is off in Settings")}</b>
+            <small className="muted">{plan ? `Matched to the ${plan.vibe_name} vibe${plan.music_offset ? ` · starts at ${fmt(plan.music_offset)} so the beat drops after the hook` : ""}` : ""}</small></div>
+          <select className="mini-select" value={audio.music_mood || "auto"} onChange={(e) => set({ music_mood: e.target.value })} title="Use music for a different mood">
+            <option value="auto">Mood: auto</option>
+            {Object.entries(vibes).map(([k, v]) => <option key={k} value={k}>Mood: {v.name}</option>)}
+          </select>
+        </div>
+      )}
       {music !== "none" && (
         <Field label="Music level"><div className="row gap">
           <Toggle on={audio.music_volume == null} onChange={(on) => set({ music_volume: on ? null : 0.12 })} label="Auto-level" />
@@ -425,9 +451,9 @@ function AudioTab({ edits, change }: { edits: Edits; change: (f: (e: Edits) => E
       {music !== "none" && music !== "auto" && (
         <div className="track-list">
           {(lib?.tracks || []).map((t: any) => (
-            <div key={t.path} className={`track ${music === t.path ? "on" : ""}`} onClick={() => set({ music: t.path })}>
+            <div key={t.path} className={`track ${music === t.path ? "on" : ""}`} onClick={() => set({ music: t.path, music_offset: null })}>
               <button className="pbtn" onClick={(e) => { e.stopPropagation(); setPlay(play === t.path ? "" : t.path); }}><Icon name={play === t.path ? "pause" : "play"} size={13} /></button>
-              <div><b>{t.title}</b><small>{t.artist || t.source || ""}{t.license ? ` · ${t.license}` : ""}</small></div>
+              <div><b>{t.title}</b><small>{(t.vibes || []).map((v: string) => vibes[v]?.name || v).join(" · ") || t.artist || t.source || ""}{t.trending ? " · Trending" : ""}</small></div>
               {t.starred && <Icon name="star" size={13} fill />}
             </div>
           ))}
@@ -437,7 +463,65 @@ function AudioTab({ edits, change }: { edits: Edits; change: (f: (e: Edits) => E
       <audio ref={aud} src={play ? mediaUrl(play) : undefined} onEnded={() => setPlay("")} />
       <div className="sec-head"><h3>Sound effects</h3><span className="muted small">copyright-free, generated by the app</span></div>
       <Seg value={audio.sfx_level || settings.sfx_level || "auto"} options={[["auto", "Auto"], ["off", "Off"], ["subtle", "Subtle"], ["medium", "Energetic"], ["high", "Max"]]} onChange={(v) => set({ sfx_level: v })} />
-      <p className="muted small">Auto matches the sound design to the clip: more hits for fast, loud talk, fewer for calm clips. The preview plays the sound effects and music too; the export mixes them under the voice.</p>
+      <Field label={`Sound pack${plan && (audio.sfx_pack || "auto") === "auto" ? ` · now ${plan.pack_name}` : ""}`}>
+        <div className="chips">
+          {Object.entries(packs).map(([k, n]) => <button key={k} className={`chipbtn ${(audio.sfx_pack || "auto") === k ? "on" : ""}`} onClick={() => set({ sfx_pack: k })}>{n}</button>)}
+        </div>
+      </Field>
+      <p className="muted small">Every Short picks its own sounds and variations from the pack, so no two sound the same. Each focus zoom gets its own hit, and the opening effect gets a matching sound. Shuffle for a new mix.</p>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ vibe, opening and focus zooms
+function VibeTab({ c, edits, change, style, plan, tl, seek }: { c: Clip; edits: Edits; change: (f: (e: Edits) => Edits) => void; style: Style; plan: FxPlan | null; tl: ReturnType<typeof buildTimeline>; seek: (t: number) => void }) {
+  const cat = useStore((s) => s.catalog)!;
+  const vibes = cat.vibes || {};
+  const setStyle = (patch: Partial<Style>) => change((e) => ({ ...e, style: { ...(e.style || {}), ...patch } }));
+  const detected = c.vibe && vibes[c.vibe] ? vibes[c.vibe].name : "";
+  const custom = Array.isArray(edits.zooms);
+  const zoomsAbs: number[] = custom ? (edits.zooms as number[]) : (plan?.punches || []).map(([t]) => Math.round(absAt(tl, t) * 100) / 100);
+  const setZooms = (z: number[] | null) => change((e) => ({ ...e, zooms: z ? [...new Set(z.map((x) => Math.round(x * 100) / 100))].sort((a, b) => a - b) : undefined }));
+  const TofAbs = (abs: number) => { for (const g of tl.segs) { if (abs < g.b) return g.t0 + Math.max(0, abs - g.a); } return tl.D; };
+  const addHere = () => setZooms([...zoomsAbs, absAt(tl, playTime())]);
+  const opening = style.intro === "auto" ? plan?.intro : style.intro;
+  return (
+    <div className="vibe-tab">
+      <div className="sec-head"><h3>Vibe</h3>{detected && <span className="muted small">detected: {detected}</span>}</div>
+      <p className="muted small">The vibe picks the music, sound pack, camera moves and opening. Change it and everything follows.</p>
+      <div className="chips">
+        <button className={`chipbtn ${!edits.vibe ? "on" : ""}`} onClick={() => change((e) => ({ ...e, vibe: undefined }))}><Icon name="spark" size={12} /> Auto{detected ? ` (${detected})` : ""}</button>
+        {Object.entries(vibes).map(([k, v]) => <button key={k} className={`chipbtn ${edits.vibe === k ? "on" : ""}`} onClick={() => change((e) => ({ ...e, vibe: k }))}>{v.name}</button>)}
+      </div>
+
+      <div className="sec-head"><h3>Opening (hook) effect</h3>{style.intro === "auto" && plan && <span className="muted small">now: {cat.intros[plan.intro] || plan.intro}</span>}</div>
+      <div className="chips">
+        <button className={`chipbtn ${style.intro === "auto" ? "on" : ""}`} onClick={() => setStyle({ intro: "auto" })}><Icon name="spark" size={12} /> Auto (vibe)</button>
+        {Object.entries(cat.intros).map(([k, n]) => <button key={k} className={`chipbtn ${style.intro === k ? "on" : ""}`} onClick={() => { setStyle({ intro: k }); seek(0); }}>{n}</button>)}
+      </div>
+      {opening && opening !== "none" && <p className="muted small">Plays at the very start with its own sound. Press play from 0:00 to see it.</p>}
+
+      <div className="sec-head"><h3>Focus zooms</h3>
+        <span className="muted small">{zoomsAbs.length} zoom{zoomsAbs.length === 1 ? "" : "s"} · {custom ? "your own" : "automatic on key words"}</span></div>
+      <div className="row gap wrap">
+        <Btn small icon="plus" onClick={addHere}>Add zoom at playhead</Btn>
+        {custom && <Btn small kind="ghost" icon="undo" onClick={() => setZooms(null)}>Back to automatic</Btn>}
+        {zoomsAbs.length > 0 && <Btn small kind="ghost" icon="x" onClick={() => setZooms([])}>No zooms</Btn>}
+      </div>
+      <Field label="Zoom strength">
+        <Slider value={edits.zoom_mult ?? 1} min={0.4} max={1.8} step={0.05} fmt={(v) => `${Math.round(v * 100)}%`}
+          onChange={(v) => change((e) => ({ ...e, zoom_mult: v }))} />
+      </Field>
+      {style.motion !== "punch" && style.motion !== "auto" && !custom && <p className="muted small">Camera motion is “{cat.motions[style.motion] || style.motion}”: automatic zooms are lighter. Choose Punch Zooms in Style → Colour & motion for full focus zooms.</p>}
+      <div className="zoom-list">
+        {zoomsAbs.map((z, i) => (
+          <span key={i} className="zoom-chip">
+            <button className="linkbtn" onClick={() => seek(TofAbs(z) + 0.01)} title="Jump there">{fmt(TofAbs(z))}</button>
+            <button className="x" title="Remove this zoom" onClick={() => setZooms(zoomsAbs.filter((_, j) => j !== i))}><Icon name="x" size={11} /></button>
+          </span>
+        ))}
+      </div>
+      <p className="muted small">Each zoom pushes in on the speaker's face, holds, then eases out, with a matching sound. The yellow marks on the timeline under the player show where they are.</p>
     </div>
   );
 }

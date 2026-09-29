@@ -4,12 +4,14 @@ import { saveSettings, toast, useStore } from "../lib/store";
 import { Icon } from "../components/Icon";
 import { Btn, Chip, Field, IconBtn, Select, Seg, Slider, Text, Toggle } from "../components/ui";
 
-type Local = { name: string; path: string; title: string; artist: string; license: string; source: string; credit: string; starred: boolean };
+type Local = { name: string; path: string; title: string; artist: string; license: string; source: string; credit: string; starred: boolean;
+  trending?: boolean; vibes?: string[]; bpm?: number };
+const TREND_QUERIES = ["phonk", "trap beat", "epic cinematic", "sad piano", "funny quirky", "lofi chill", "motivational", "dark suspense"];
 
 export function MusicPage() {
   const s = useStore((x) => x.settings);
   const cat = useStore((x) => x.catalog);
-  const [lib, setLib] = useState<{ folder: string; tracks: Local[] } | null>(null);
+  const [lib, setLib] = useState<{ folder: string; trending_folder?: string; tracks: Local[] } | null>(null);
   const [q, setQ] = useState("");
   const [src, setSrc] = useState("all");
   const [failed, setFailed] = useState<string[]>([]);
@@ -35,10 +37,10 @@ export function MusicPage() {
   useEffect(() => { const a = audio.current; if (!a) return; if (play) { a.src = play; a.play().catch(() => {}); } else a.pause(); }, [play]);
   const set = (patch: Record<string, any>) => saveSettings(patch).catch((e) => toast(e.message, "error"));
 
-  const search = async (pg = 1) => {
+  const search = async (pg = 1, qq = q) => {
     setBusy(true);
     try {
-      const r = await api<any>("/api/music/search", { source: src, query: q, page: pg });
+      const r = await api<any>("/api/music/search", { source: src, query: qq, page: pg });
       setRes(pg === 1 ? r.tracks : [...(res || []), ...r.tracks]); setMore(r.more); setPage(pg); setFailed(r.failed || []);
     } catch (e: any) { toast(e.message, "error"); setRes([]); }
     setBusy(false);
@@ -61,20 +63,24 @@ export function MusicPage() {
         </div>
         <div className="mus-settings">
           <Toggle on={!!s.add_music} onChange={(v) => set({ add_music: v })} label="Add music to new Shorts" />
+          <Toggle on={s.music_match !== false} onChange={(v) => set({ music_match: v })} label="Match music to each clip's vibe" />
           <Field label="Which tracks"><Seg value={s.music_mode || "random"} options={[["random", "Any track"], ["starred", `Starred only (${starred})`]]} onChange={(v) => set({ music_mode: v })} /></Field>
           <Field label="Level"><div className="row gap"><Toggle on={s.music_auto !== false} onChange={(v) => set({ music_auto: v })} label="Auto" />
             {s.music_auto === false && <Slider value={s.music_volume ?? 0.12} min={0} max={0.5} step={0.01} fmt={(v) => `${Math.round(v * 200)}%`} onChange={(v) => set({ music_volume: v })} />}</div></Field>
         </div>
         {lib?.folder && <p className="muted small folder-note" title={lib.folder}>Saved in {lib.folder}</p>}
+        {lib?.trending_folder && <p className="muted small trend-note">
+          <Icon name="flame" size={12} /> Tracks you own the rights to that are trending right now: put them in the <button className="linkbtn" onClick={() => api("/api/open", { path: lib.trending_folder })}>Trending folder</button>. Auto music prefers them when they fit the clip.</p>}
         <div className="track-list scroll">
           {lib && !lib.tracks.length && <div className="act-empty"><Icon name="music" size={26} /><p>No tracks yet. Search free music on the right, or add your own files.</p></div>}
           {lib?.tracks.map((t) => (
             <div key={t.name} className="track">
               <button className="pbtn" onClick={() => setPlay(play === mediaUrl(t.path) ? "" : mediaUrl(t.path))}><Icon name={play === mediaUrl(t.path) ? "pause" : "play"} size={13} /></button>
-              <div><b>{t.title}</b><small>{[t.artist, t.source, t.license].filter(Boolean).join(" · ")}</small></div>
+              <div><b>{t.title}</b><small>{[(t.vibes || []).map((v) => cat?.vibes?.[v]?.name || v).join(" / "), t.bpm ? `${Math.round(t.bpm)} BPM` : "", t.artist, t.license].filter(Boolean).join(" · ")}</small></div>
+              {t.trending && <Chip tone="red" icon="flame">Trending</Chip>}
               {t.credit && <Chip title={t.credit}>credit</Chip>}
               <IconBtn icon="star" title={t.starred ? "Unstar" : "Star"} active={t.starred} onClick={() => api("/api/music/star", { name: t.name, on: !t.starred }).then(load)} />
-              <IconBtn icon="trash" danger title="Remove" onClick={() => { if (confirm(`Delete ${t.title}?`)) api("/api/music/remove", { name: t.name }).then(load); }} />
+              <IconBtn icon="trash" danger title="Remove" onClick={() => { if (confirm(`Delete ${t.title}?`)) api("/api/music/remove", { name: t.name, path: t.path }).then(load); }} />
             </div>
           ))}
         </div>
@@ -92,6 +98,8 @@ export function MusicPage() {
           )}
           {failed.length > 0 && <p className="muted small">Not answering right now: {failed.join(", ")}. Results from the other sources are below.</p>}
           <div className="results scroll">
+            <div className="chips-row trend-q"><span className="muted small"><Icon name="flame" size={12} /> Trending styles:</span>
+              {TREND_QUERIES.map((t) => <button key={t} className="chipbtn sm" onClick={() => { setQ(t); search(1, t); }}>{t}</button>)}</div>
             {res && !res.length && <p className="muted">No results. Try another word.</p>}
             {res?.map((t) => (
               <div key={t.id} className="track">
@@ -108,10 +116,8 @@ export function MusicPage() {
         </div>
         <div className="glass depth mus-make">
           <div className="sec-head"><h2><Icon name="spark" size={17} /> Make music</h2><span className="muted small">original tracks made on your PC · zero copyright claims · works offline</span></div>
-          <div className="mood-row">
-            {Object.entries(moods).map(([k, n]) => <button key={k} className={`chipbtn ${mood === k ? "on" : ""}`} onClick={() => setMood(k)}>{n}</button>)}
-          </div>
-          <div className="row gap">
+          <div className="row gap wrap">
+            <Select value={mood} options={Object.entries(moods) as [string, string][]} onChange={setMood} />
             <Seg value={String(secs)} options={[["60", "1 min"], ["90", "1.5 min"], ["150", "2.5 min"]]} onChange={(v) => setSecs(Number(v))} />
             <div className="grow" />
             <Btn icon="star" busy={genBusy} onClick={() => generate(true)}>Make & star</Btn>

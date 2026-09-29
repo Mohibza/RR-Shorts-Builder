@@ -152,9 +152,9 @@ class Settings:
     hook_style: str = "random"
     cta_style: str = "random"
     layout: str = "auto"             # auto | smart_crop | blur_fit | center_crop | split
-    color_grade: str = "random"
-    motion: str = "random"
-    intro: str = "random"
+    color_grade: str = "random"      # also "auto" = picked by the clip's vibe
+    motion: str = "auto"             # auto = focus zooms / camera move picked by the clip's vibe
+    intro: str = "auto"              # auto = opening effect picked by the clip's vibe
     caption_pool: list = field(default_factory=list)   # styles used by "random" (empty = all)
     hook_pool: list = field(default_factory=list)
     hook_title: bool = True
@@ -174,6 +174,9 @@ class Settings:
     music_selected: list = field(default_factory=list)
     sfx_level: str = "auto"          # off | auto | subtle | medium | high  (generated, copyright-free)
     sfx_volume: float = 0.55
+    sfx_pack: str = "auto"           # auto (by vibe) | cinematic | hype | clean | funny | tech
+    music_match: bool = True         # Auto music: pick the track whose mood fits the clip's vibe
+    zoom_strength: float = 1.0       # focus zooms: 0.5 = gentle .. 1.5 = strong
     remove_pauses: bool = True       # jump-cut dead air for faster pacing
     jamendo_client_id: str = ""      # free key for in-app Jamendo search
     music_safe_only: bool = True     # only show tracks that allow monetized use
@@ -219,7 +222,7 @@ class Settings:
     cookies_browser: str = ""        # e.g. chrome, edge, firefox (for yt-dlp)
 
     extra: dict = field(default_factory=dict)
-    settings_version: int = 4
+    settings_version: int = 5
 
     @classmethod
     def load(cls) -> "Settings":
@@ -243,7 +246,12 @@ class Settings:
                         s.sfx_level = "auto"
                     if s.whisper_model == "small":
                         s.whisper_model = "auto"
-                s.settings_version = 4
+                if ver < 5:  # v2.3: vibe engine picks the opening + camera moves so every Short differs
+                    if s.motion in ("random", "punch"):
+                        s.motion = "auto"
+                    if s.intro in ("random", "shake", "flash"):
+                        s.intro = "auto"
+                s.settings_version = 5
             except Exception:
                 pass
         return s

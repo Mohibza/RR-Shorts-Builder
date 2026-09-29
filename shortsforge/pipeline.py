@@ -21,7 +21,7 @@ from .effects import CAMERA_LAYOUTS, COLOR_GRADES, INTROS, LAYOUTS, MOTIONS
 from . import sfx
 from .facetrack import camera_path, track_faces
 from .pacing import tighten
-from . import director
+from . import director, music_index, vibe as vibes
 from .llm import AI
 from .romanize import romanize_text, romanize_transcript
 from .highlights import INTENSE, Clip, words_in_range
@@ -55,6 +55,19 @@ class StyleChoice:
         ])
 
 
+AUTO_KEYS = {"motion": "motions", "intro": "intros", "color_grade": "grades"}
+
+
+def resolve_auto(choice: "StyleChoice", vibe: str, seed: int) -> "StyleChoice":
+    """Any look option still set to "auto" becomes the vibe's pick (seeded, so preview == export)."""
+    import dataclasses
+    ch = {}
+    for key, lst in AUTO_KEYS.items():
+        if getattr(choice, key) == "auto":
+            ch[key] = vibes.pick(vibe or "story", lst, seed)
+    return dataclasses.replace(choice, **ch) if ch else choice
+
+
 class StyleRotator:
     """Hands out a different combination for every Short (or the fixed choice)."""
 
@@ -75,21 +88,23 @@ class StyleRotator:
             self.rnd.shuffle(options)
             self.pools[key] = options
 
-    def pick(self, key: str, i: int) -> str:
+    def pick(self, key: str, i: int, vibe: str = "", seed: int = 0) -> str:
         val = getattr(self.s, key)
         if val == "random":
             pool = self.pools[key]
             return pool[i % len(pool)]
+        if val == "auto" and key in AUTO_KEYS:
+            return vibes.pick(vibe or "story", AUTO_KEYS[key], seed + i)
         return val
 
-    def choice(self, i: int) -> StyleChoice:
+    def choice(self, i: int, vibe: str = "", seed: int = 0) -> StyleChoice:
         return StyleChoice(
             caption_style=self.pick("caption_style", i),
             hook_style=self.pick("hook_style", i) if self.s.hook_title else None,
             cta_style=self.pick("cta_style", i) if self.s.cta_text.strip() else None,
-            color_grade=self.pick("color_grade", i),
-            motion=self.pick("motion", i),
-            intro=self.pick("intro", i),
+            color_grade=self.pick("color_grade", i, vibe, seed),
+            motion=self.pick("motion", i, vibe, seed),
+            intro=self.pick("intro", i, vibe, seed),
             layout=self.s.layout,
             position=self.s.caption_position,
             place=dict(getattr(self.s, "placement", {}) or {}),
@@ -127,6 +142,56 @@ def _punch_times(words: list[dict], emphasis: set) -> list[float]:
             times.append(w["s"])
             last = w["s"]
     return times
+
+
+def abs_to_play(pieces: list, T: float) -> Optional[float]:
+    """Absolute source time -> time in the finished Short (None if that moment was cut out)."""
+    t = 0.0
+    for a, b, keep in pieces:
+        for x, y in ([tuple(k) for k in keep] or [(0.0, b - a)]):
+            if a + x - 0.02 <= T < a + y:
+                return round(t + max(0.0, T - a - x), 3)
+            t += y - x
+    return None
+
+
+def focus_punches(words: list[dict], emphasis: set, amt: float) -> list[tuple[float, float]]:
+    """Automatic focus zooms on key words, alternating a strong and a lighter push for rhythm."""
+    return [(t, round(amt * (1.0 if i % 2 == 0 else 0.7), 4)) for i, t in enumerate(_punch_times(words, emphasis))]
+
+
+def creative_inputs(c: dict, edits: dict) -> dict:
+    """The vibe engine's inputs for a project clip + the user's edits."""
+    audio = edits.get("audio") or {}
+    return {"vibe": c.get("vibe") or "", "vibe_override": edits.get("vibe") or "",
+            "seed": c.get("seed") or vibes.seed_for(c.get("clip", {}).get("start", 0), c.get("index", 0)),
+            "reshuffle": int(audio.get("seed") or 0), "zooms_abs": edits.get("zooms"),
+            "zoom_mult": edits.get("zoom_mult") or 1.0,
+            "pack": audio.get("sfx_pack") if audio.get("sfx_pack") not in (None, "", "auto") else "",
+            "music_mood": audio.get("music_mood") if audio.get("music_mood") not in (None, "", "auto") else ""}
+
+
+@dataclass
+class Creative:
+    """Everything the vibe decides for one Short. Same inputs -> same result (preview == export)."""
+    vibe: str
+    seed: int
+    punches: list
+    pack: str
+    music: str = ""
+    music_offset: float = 0.0
+    music_why: str = ""
+    motion: str = ""
+    intro: str = ""
+    grade: str = ""
+
+    def to_json(self) -> dict:
+        from .sfx import PACK_NAMES
+        return {"vibe": self.vibe, "vibe_name": vibes.VIBES.get(self.vibe, {}).get("name", self.vibe),
+                "seed": self.seed, "punches": [[round(t, 3), a] for t, a in self.punches], "pack": self.pack,
+                "pack_name": PACK_NAMES.get(self.pack, self.pack), "music": self.music,
+                "music_name": Path(self.music).stem if self.music else "", "music_offset": self.music_offset,
+                "music_why": self.music_why, "motion": self.motion, "intro": self.intro, "grade": self.grade}
 
 
 def _out_fps(setting: int, src_fps: float) -> int:
@@ -356,13 +421,21 @@ class Pipeline:
                 if h and h.lower() not in {x.lower() for x in hooks}:
                     hooks.append(h)
             reasons = {k: v for k, v in (c.reasons or {}).items() if k != "seo"}
+            en = ctx["energy"]
+            try:
+                e_slice = list(en[int(lo / 0.1): int(hi / 0.1)]) if en is not None and len(en) else None
+            except Exception:
+                e_slice = None
+            vb = vibes.detect(words, e_slice, str(reasons.get("vibe") or ""))
+            cseed = vibes.seed_for(item.vid, i)
             cd = c.to_dict()
             cd["reasons"] = reasons
             out.append({
                 "id": f"c{i + 1}", "index": i, "clip": cd, "score": sc["score"], "breakdown": sc["breakdown"],
                 "reasons": sc["reasons"], "hooks": hooks[:4], "seo": {k: v for k, v in seo.items() if k != "hooks"},
                 "media": {"file": str(media), "offset": float(off)}, "words": words,
-                "style": asdict(rot.choice(i)), "poster": "", "edits": {}, "exports": [], "status": "new",
+                "style": asdict(rot.choice(i, vb["vibe"], cseed)), "vibe": vb["vibe"], "seed": cseed,
+                "poster": "", "edits": {}, "exports": [], "status": "new",
                 "duration": round(c.duration, 2),
             })
         # keep the user's edits/exports if the same video is analysed again and the moment is the same
@@ -441,6 +514,7 @@ class Pipeline:
         if c is None:
             raise RuntimeError("That clip is no longer in the project.")
         edits = dict(c.get("edits") or {}) if edits is None else edits
+        licensing.check(f"{project['id']}/{cid}")      # trial over? say so before doing any work
         media, off = c["media"]["file"], float(c["media"]["offset"])
         if not Path(media).exists():
             raise RuntimeError("The video for this clip is no longer in the cache. Analyse the video again.")
@@ -454,6 +528,8 @@ class Pipeline:
             if Path(music).exists():
                 s.add_music = True
                 extra["music"] = music
+                if audio.get("music_offset") is not None:
+                    extra["music_offset"], extra["keep_offset"] = float(audio["music_offset"]), True
         if audio.get("music_volume") is not None:
             s.music_volume = float(audio["music_volume"])
             s.music_auto = False            # the user picked a level: use it instead of auto-levelling
@@ -482,6 +558,7 @@ class Pipeline:
             self.track_clip(project, c)
         extra["tracks"] = c.get("tracks") or None
         extra["hook_text"] = hook or None
+        extra["creative"] = creative_inputs(c, edits)
         if edits.get("meta"):
             extra["meta_edit"] = {k: v for k, v in edits["meta"].items() if v not in (None, "")}
         extra.update(apply_export_prefs(s, edits.get("export") or getattr(s, "export_prefs", None)))
@@ -508,22 +585,62 @@ class Pipeline:
         c["exports"], c["status"] = c2["exports"], "exported"
         return res
 
-    # ------------------------------------------------------------------ audio helpers (export + live preview)
-    def _choose_music(self, s: Settings, extra: dict, index: int, vid: str, D: float) -> tuple[str, float]:
-        if s.add_music and extra.get("music") and Path(extra["music"]).exists():   # re-render keeps the track
-            return extra["music"], float(extra.get("music_offset", 0.0))
-        if s.add_music and (s.music_volume > 0 or getattr(s, "music_auto", True)):
-            rnd = random.Random(index * 31 + len(vid) + int(time.time() // 86400))
-            only = s.music_selected if getattr(s, "music_mode", "random") == "starred" else None
+    # ------------------------------------------------------------------ vibe: music, sounds, zooms, opening
+    def creative(self, s: Settings, cin: dict, words: list, D: float, pieces: list, choice: "StyleChoice",
+                 clip: Clip, index: int, emphasis: set, extra: dict, log: bool = True) -> tuple["Creative", "StyleChoice"]:
+        """Resolve the vibe-driven choices for one Short.
+
+        cin (from the project clip + the user's edits): vibe (detected), vibe_override, seed, reshuffle,
+        zooms_abs (manual zoom moments, absolute source seconds; None = automatic), zoom_mult, pack,
+        music_mood (a vibe whose music to use instead)."""
+        vibe = cin.get("vibe_override") or cin.get("vibe") or ""
+        if vibe not in vibes.VIBES:
+            vibe = vibes.detect(words, None, str((clip.reasons or {}).get("vibe") or ""))["vibe"]
+        seed = int(cin.get("seed") or vibes.seed_for(clip.start, index)) + 7919 * int(cin.get("reshuffle") or 0)
+        choice = resolve_auto(choice, vibe, seed)
+        amt = vibes.zoom_amount(vibe) * float(getattr(s, "zoom_strength", 1.0) or 1.0) * float(cin.get("zoom_mult") or 1.0)
+        zabs = cin.get("zooms_abs")
+        if zabs is not None:
+            pts = sorted(t for t in (abs_to_play(pieces, float(z)) for z in zabs) if t is not None)
+            punches = [(t, round(amt * (1.0 if i % 2 == 0 else 0.75), 4)) for i, t in enumerate(pts)]
+        elif choice.motion == "punch":
+            punches = focus_punches(words, emphasis, amt)
+        elif choice.motion not in ("none", "") and cin.get("light_zooms", True):
+            # a gentle camera move + a lighter focus push on every other key moment
+            punches = [(t, round(a * 0.55, 4)) for i, (t, a) in enumerate(focus_punches(words, emphasis, amt)) if i % 2 == 0]
+        else:
+            punches = []
+        punches = [(t, a) for t, a in punches if 0.3 <= t < D - 0.4]   # the zooms that can actually play
+        pack = cin.get("pack") or getattr(s, "sfx_pack", "auto") or "auto"
+        if pack == "auto":
+            pack = vibes.pack_for(vibe)
+        cr = Creative(vibe=vibe, seed=seed, punches=punches, pack=pack, motion=choice.motion, intro=choice.intro,
+                      grade=choice.color_grade)
+        # music
+        if extra.get("music") and Path(extra["music"]).exists():
+            cr.music, cr.music_offset = extra["music"], float(extra.get("music_offset") or 0.0)
+            cr.music_why = "chosen"
+            if cr.music_offset <= 0 and not extra.get("keep_offset"):
+                f = music_index.features([Path(cr.music)]).get(cr.music) or {}
+                cr.music_offset = music_index.offset_for(f, D, random.Random(seed))
+        elif s.add_music and not extra.get("no_music") and (s.music_volume > 0 or getattr(s, "music_auto", True)):
             from .config import usable_music_dir
             folder = str(usable_music_dir(s.music_dir)[0])
-            music = _pick_music(s.music_dir, rnd, only) or _pick_music(folder, rnd, only) or _auto_track(folder, self.log)
-            if music:
-                return music, _music_offset(music, D, rnd)
-        return "", 0.0
+            only = s.music_selected if getattr(s, "music_mode", "random") == "starred" else None
+            want = cin.get("music_mood") or vibe
+            if getattr(s, "music_match", True):
+                cr.music, cr.music_offset, cr.music_why = music_index.choose(
+                    want, seed, index, [s.music_dir, folder], D, only, folder, self.log if log else (lambda m: None))
+            if not cr.music:
+                rnd = random.Random(seed)
+                m = _pick_music(s.music_dir, rnd, only) or _pick_music(folder, rnd, only) or _auto_track(folder, self.log)
+                if m:
+                    cr.music, cr.music_offset, cr.music_why = m, _music_offset(m, D, rnd), "random"
+        return cr, choice
 
+    # ------------------------------------------------------------------ audio helpers (export + live preview)
     def _sfx_track(self, s: Settings, words: list, D: float, cap: dict, choice: "StyleChoice", plan, emphasis: set,
-                   pieces: list, punch: list, out: str) -> str:
+                   pieces: list, punch: list, out: str, cr: Optional["Creative"] = None) -> str:
         level = sfx.resolve_level(getattr(s, "sfx_level", "auto"), words, D)
         if level == "off":
             return ""
@@ -534,16 +651,19 @@ class Pipeline:
             if plan.hook_text:
                 hook_end = float((choice.place or {}).get("hook_dur")
                                  or HOOK_STYLES.get(choice.hook_style or "", {}).get("dur") or 3.0)
-            events = sfx.plan(level, D, words, chunk_starts, cap, hook_anim, choice.intro, choice.motion, punch,
+            pts = [p[0] if isinstance(p, (list, tuple)) else p for p in punch]
+            events = sfx.plan(level, D, words, chunk_starts, cap, hook_anim, choice.intro, choice.motion, pts,
                               bool(choice.cta_style and s.cta_text.strip()), emphasis,
-                              seams=_seams(pieces), hook_end=hook_end)
+                              seams=_seams(pieces), hook_end=hook_end,
+                              pack=cr.pack if cr else vibes.pack_for("story"), seed=cr.seed if cr else 0)
             return sfx.mix_track(events, D, out, getattr(s, "sfx_volume", 0.55), level) or ""
         except Exception as e:  # sound effects are a bonus, never fail a render for them
             self.log(f"  (sound effects skipped: {e})")
             return ""
 
-    def preview_audio(self, project: dict, cid: str, edits: dict, out_path: str) -> tuple[str, float]:
-        """Sound effects + music for the live preview (the voice comes from the video itself)."""
+    def preview_audio(self, project: dict, cid: str, edits: dict, out_path: str) -> tuple[str, float, dict]:
+        """Sound effects + music for the live preview (the voice comes from the video itself), plus the vibe plan
+        (focus zooms, opening, chosen track) so the preview shows exactly what the export will do."""
         import copy
         import dataclasses
         from . import projects
@@ -560,6 +680,8 @@ class Pipeline:
         elif music_sel and music_sel != "auto" and Path(music_sel).exists():
             s.add_music = True
             extra["music"] = music_sel
+            if audio.get("music_offset") is not None:
+                extra["music_offset"], extra["keep_offset"] = float(audio["music_offset"]), True
         if audio.get("sfx_level"):
             s.sfx_level = audio["sfx_level"]
         parts = projects.playback_parts(c, edits)
@@ -585,10 +707,18 @@ class Pipeline:
         work.mkdir(parents=True, exist_ok=True)
         plan, emphasis = self._write_ass(work / f"{cid}_aud.ass", words, D, cl, choice, int(c["index"]),
                                          project.get("language", "en"), hook or None, s)
+        cr, choice = self.creative(s, creative_inputs(c, edits), words, D, pieces, choice, cl, int(c["index"]),
+                                   emphasis, extra, log=False)
         cap = CAPTION_STYLES.get(choice.caption_style, {})
-        fx = self._sfx_track(s, words, D, cap, choice, plan, emphasis, pieces, _punch_times(words, emphasis),
-                             str(work / f"{cid}_fx.wav"))
-        music, moff = self._choose_music(s, extra, int(c["index"]), project["id"], D)
+        fx = self._sfx_track(s, words, D, cap, choice, plan, emphasis, pieces, cr.punches,
+                             str(work / f"{cid}_fx.wav"), cr)
+        music, moff = cr.music, cr.music_offset
+        info = cr.to_json()
+        # so the live captions match the export exactly: emphasised words and each caption's tilt
+        info["emphasis"] = sorted(emphasis)
+        if cap.get("tilt"):
+            rnd_t = random.Random(plan.seed)
+            info["tilts"] = [round(rnd_t.uniform(-4, 4), 1) for _ in chunk_words(words, cap.get("chunk", 3), cap.get("maxchars", 18))]
         args, n = [], 0
         if fx:
             args += ["-i", fx]
@@ -596,12 +726,16 @@ class Pipeline:
         if music:
             args += ["-stream_loop", "-1", "-ss", f"{moff:.2f}", "-i", music]
         if not fx and not music:
-            return "", D
-        vol = 0.35 if audio.get("music_volume") is None and getattr(s, "music_auto", True) else \
-            min(1.0, float(audio.get("music_volume") if audio.get("music_volume") is not None else s.music_volume) * 2.5)
+            return "", D, info
+        # same level as the export: loudness-matched ~13 dB under the voice (+ a little for the ducking)
+        if audio.get("music_volume") is None and getattr(s, "music_auto", True):
+            lvl = "loudnorm=I=-27:TP=-4:LRA=9,aresample=48000,volume=0.8"
+        else:
+            v = float(audio.get("music_volume") if audio.get("music_volume") is not None else s.music_volume)
+            lvl = f"volume={min(1.0, v):.3f}"
         g = []
         if music:
-            g.append(f"[{n}:a]aresample=48000,aformat=channel_layouts=stereo,volume={vol:.3f},atrim=0:{D:.3f},"
+            g.append(f"[{n}:a]aresample=48000,aformat=channel_layouts=stereo,{lvl},atrim=0:{D:.3f},"
                      f"afade=t=in:d=1,afade=t=out:st={max(0, D - 1.5):.3f}:d=1.5[m]")
         if fx and music:
             g.append("[0:a]aresample=48000,aformat=channel_layouts=stereo,apad[f];[f][m]amix=inputs=2:duration=longest:"
@@ -612,7 +746,7 @@ class Pipeline:
             g.append("[m]anull[o]")
         run_ffmpeg(args + ["-filter_complex", ";".join(g), "-map", "[o]", "-t", f"{D:.3f}", "-c:a", "libopus",
                            "-b:a", "112k", out_path], D)
-        return out_path, D
+        return out_path, D, info
 
     def preview_clip(self, project: dict, cid: str, edits: dict, t: float, out_png: str) -> tuple[str, float]:
         """Exact still of the edited clip at playback time t (same filters as the export, no audio)."""
@@ -643,13 +777,17 @@ class Pipeline:
         work = WORK / "preview"
         work.mkdir(parents=True, exist_ok=True)
         ass_file = work / f"{cid}_preview.ass"
-        self._write_ass(ass_file, prep["words"], prep["D"], cl, choice, int(c["index"]),
-                        project.get("language", "en"), hook or None)
+        _plan, emphasis = self._write_ass(ass_file, prep["words"], prep["D"], cl, choice, int(c["index"]),
+                                          project.get("language", "en"), hook or None)
+        cr, choice = self.creative(self.s, creative_inputs(c, edits), prep["words"], prep["D"], prep["pieces"],
+                                   choice, cl, int(c["index"]), emphasis, {"no_music": True}, log=False)
         cap = CAPTION_STYLES.get(choice.caption_style, {})
         job = RenderJob(src=c["media"]["file"], start=cl.start, end=cl.end, parts=prep["pieces"], out_path=out_png,
                         src_w=info["width"], src_h=info["height"], ass_file=str(ass_file), layout=prep["layout"],
                         camera=prep["camera"], grade=choice.color_grade, progress_bar=self.s.progress_bar,
                         accent=cap.get("active") or cap.get("primary") or "#FFE400", has_audio=False,
+                        motion=choice.motion, intro=choice.intro, punch_times=cr.punches,
+                        fps=_out_fps(self.s.fps, info.get("fps", 30)),
                         src_offset=off, **_frame_args(choice.place))
         return preview_frame(job, max(0.0, min(t, prep["D"] - 0.05)), out_png), prep["D"]
 
@@ -819,9 +957,13 @@ class Pipeline:
 
         cap = CAPTION_STYLES.get(choice.caption_style, {})
         accent = cap.get("active") or cap.get("primary") or "#FFE400"
-        music, music_offset = self._choose_music(s, extra, index, item.vid, D)
-        if music and not extra.get("music"):
-            self.log(f"  Short {index + 1}: music “{Path(music).stem}”")
+        cin = dict(extra.get("creative") or {})
+        cin.setdefault("seed", vibes.seed_for(item.vid, index))
+        cr, choice = self.creative(s, cin, words, D, pieces, choice, clip, index, emphasis, extra)
+        music, music_offset = cr.music, cr.music_offset
+        self.log(f"  Short {index + 1}: vibe {vibes.VIBES[cr.vibe]['name']} · sounds {cr.pack} · "
+                 f"{len(cr.punches)} focus zooms · opening {cr.intro}"
+                 + (f" · music “{Path(music).stem}”" if music else ""))
         out_path = out_dir / f"{stem}.mp4"
         # clean up an older render of the same slot (title may differ after re-style)
         for old in out_dir.glob(f"{index + 1:02d} - *.mp4"):
@@ -833,9 +975,9 @@ class Pipeline:
                     Path(str(old)[:-4] + PLAN_SUFFIX).unlink(missing_ok=True)
                 except OSError:
                     pass
-        punch = _punch_times(words, emphasis)
+        punch = cr.punches
         sfx_file = self._sfx_track(s, words, D, cap, choice, plan, emphasis, pieces, punch,
-                                   str(work / f"{index + 1:02d}_sfx.wav"))
+                                   str(work / f"{index + 1:02d}_sfx.wav"), cr)
         job = RenderJob(
             src=src, start=clip.start, end=clip.end, parts=pieces, out_path=str(out_path), src_w=info["width"],
             src_h=info["height"], ass_file=str(ass_file), layout=layout, camera=camera,
@@ -849,7 +991,14 @@ class Pipeline:
             **_frame_args(choice.place),
         )
         t0 = time.time()
-        render(job, prog, self.cancel)
+        pr = extra.get("project_ref") or {}
+        slot = f"{pr.get('project')}/{pr.get('clip')}" if pr else f"{item.vid}/{index}"
+        tok = licensing.reserve(slot)            # trial: counts this Short (raises when the trial is over)
+        try:
+            render(job, prog, self.cancel)
+        except BaseException:
+            licensing.release(tok)
+            raise
         thumb = thumbnail(str(out_path), str(out_path.with_suffix(".jpg")), at=min(1.2, D / 2)) or ""
         if extra.get("srt"):
             try:
@@ -881,7 +1030,7 @@ class Pipeline:
             "style": asdict(choice), "resolved_layout": layout, "hook_text": plan.hook_text,
             "language": lang, "words_abs": words_abs, "meta": meta, "output": str(out_path), "thumb": thumb,
             "created": time.time(), "prep": prep, "music": music, "music_offset": music_offset,
-            "project_ref": extra.get("project_ref"),
+            "project_ref": extra.get("project_ref"), "creative": cr.to_json(),
         }, ensure_ascii=False, indent=1), encoding="utf-8")
         return ShortResult(str(out_path), thumb, plan.hook_text or meta["title"], clip.start, clip.end, clip.score,
                            choice.label(), plan_file, meta)
@@ -919,13 +1068,15 @@ class Pipeline:
         work = WORK / re.sub(r"[^A-Za-z0-9_-]", "_", item.vid)
         work.mkdir(parents=True, exist_ok=True)
         extra = {"hook_text": hook_text or data.get("hook_text", ""), "prep": prep,
-                 "src_offset": float(data.get("src_offset") or 0.0)}
+                 "src_offset": float(data.get("src_offset") or 0.0), "project_ref": data.get("project_ref")}
         m = data.get("meta") or {}
         if m.get("body") is not None:   # keep upload title/description/tags the user may have edited
             extra["meta_edit"] = {"title": m.get("title", ""), "description": m.get("body", ""),
                                   "tags": m.get("tags") or [], "hashtags": m.get("hashtags") or []}
         if "music" in data:
-            extra.update(music=data.get("music") or "", music_offset=data.get("music_offset", 0.0))
+            extra.update(music=data.get("music") or "", music_offset=data.get("music_offset", 0.0), keep_offset=True)
+        if data.get("creative"):
+            extra["creative"] = {"vibe": data["creative"].get("vibe", ""), "seed": data["creative"].get("seed")}
         return self.render_clip(src, data["info"], item, transcript, clip, choice, data["index"], out_dir,
                                 work, prog, extra)
 

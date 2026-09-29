@@ -13,7 +13,7 @@ export type State = {
   signins: Record<string, any>; connect: Record<string, any>;
   uploads: Record<string, number>; libraryTick: number; projectTick: Record<string, number>;
   cameras: Record<string, { camera: [number, number][]; framing?: string }>;
-  page: string; openProject: string; editing: { project: string; clip: string } | null;
+  page: string; settingsSec?: string; openProject: string; editing: { project: string; clip: string } | null;
 };
 
 let state: State = {
@@ -137,7 +137,7 @@ export function startEvents() {
         toast(data.text, data.kind || "info", data.login ? { label: "Sign in to YouTube", run: () => go("settings", {}) } : undefined);
         break;
       case "license":
-        toast(data.text, "error", { label: "License", run: () => go("settings") });
+        toast(data.text, "error", { label: "Enter key", run: () => go("settings", { settingsSec: "license" }) });
         break;
       case "watch":
         if (data.found) toast(`Auto-watch found ${data.found} new video(s)`, "ok");

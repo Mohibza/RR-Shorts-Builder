@@ -20,7 +20,8 @@ for pkg in ("cv2", "yt_dlp_ejs", "certifi"):
     except Exception:
         pass
 datas += [("assets", "assets"), ("web/dist", "web/dist")]
-hiddenimports += ["shortsforge.selftest", "shortsforge.server", "shortsforge.engine", "shortsforge.projects",
+hiddenimports += ["shortsforge.license_pub", "shortsforge.ed25519", "shortsforge.licensing", "shortsforge.vibe",
+                  "shortsforge.music_index", "shortsforge.selftest", "shortsforge.server", "shortsforge.engine", "shortsforge.projects",
                   "shortsforge.virality", "shortsforge.musicgen", "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSvg"]
 for pkg in ("webview", "clr_loader", "pythonnet"):     # the app window (WebView2); optional
     try:

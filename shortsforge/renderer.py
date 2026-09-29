@@ -1,13 +1,15 @@
 """Build and run the FFmpeg graph that turns a time range into a finished vertical Short."""
 from __future__ import annotations
 
+import re
+
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from . import fonts
-from .effects import COLOR_GRADES, motion_filters
+from .effects import COLOR_GRADES, intro_overlay, motion_filters
 from .facetrack import x_expression
 from .pacing import select_expr
 from .utils import encoder_args, ffmpeg_cwd, filter_path, pick_encoder, pick_hevc_encoder, run_ffmpeg
@@ -109,7 +111,17 @@ def layout_graph(job: RenderJob) -> list[str]:
                 dx = (cw0 - cw) / 2 + fx * (sw - cw) / 2
                 x = f"min(max(0,({x})+{dx:.1f}),{sw - cw})"
             y = f"{(sh - ch) / 2 * (1 + fy):.0f}"
-            return [f"{pre},crop=w={cw}:h={ch}:x='{x}':y={y},scale={W}:{H}:flags=lanczos{_sharpen(H / ch)},setsar=1[base]"]
+            # camera motion runs on the small source crop before upscaling: same look, ~3x less work
+            mo = getattr(job, "_pre_motion", None)
+            if mo:
+                job._motion_done = True
+            mv = f",{mo}" if mo else ""
+            # sharpen once, on the small crop (3x3 at source size ~ the old 5x5 passes at 1080x1920, 3x faster)
+            up = H / ch
+            amt = (1.0 if up >= 1.6 else 0.65 if up >= 1.15 else 0.0) + float(getattr(job, "_grade_sharp", 0.0))
+            job._sharp_used = True
+            sh_ = f",unsharp=3:3:{min(1.6, amt):.2f}:3:3:0.0" if amt > 0.05 else ""
+            return [f"{pre},crop=w={cw}:h={ch}:x='{x}':y={y}{sh_}{mv},scale={W}:{H}:flags=lanczos,setsar=1[base]"]
     def cam_for(cw: int) -> str:
         """Crop-left expression for a window `cw` wide, following the face (camera is for a 9:16 window)."""
         cam = job.camera
@@ -261,14 +273,20 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
                                                                 if abs(job.music_volume - 0.12) > 0.005 else "")
                  if job.music_auto else f"volume={job.music_volume:.3f}")
 
-    g += layout_graph(job)
-    cur = "base"
+    mo = motion_filters(job.motion, D, job.punch_times, job.intro, job.fps)
     grade = COLOR_GRADES.get(job.grade, COLOR_GRADES["none"])["vf"]
+    gs = re.search(r"unsharp=5:5:([\d.]+):5:5:0\.0,?", grade)
+    job._pre_motion, job._motion_done, job._sharp_used = mo, False, False
+    job._grade_sharp = float(gs.group(1)) * 0.6 if gs else 0.0
+    g += layout_graph(job)
+    job._pre_motion = None
+    if gs and job._sharp_used:          # the grade's sharpening already happened on the crop
+        grade = grade.replace(gs.group(0), "").strip(",")
+    cur = "base"
     if grade:
         g.append(f"[{cur}]{grade}[graded]")
         cur = "graded"
-    mo = motion_filters(job.motion, D, job.punch_times, job.intro, job.fps)
-    if mo:
+    if mo and not job._motion_done:
         g.append(f"[{cur}]{mo}[moved]")
         cur = "moved"
     if job.progress_bar:
@@ -278,14 +296,9 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
         cur = "pbd"
     g.append(f"[{cur}]ass=filename={filter_path(job.ass_file)}:fontsdir={filter_path(fontsdir)}[subd]")
     cur = "subd"
-    if job.intro == "flash":
-        g.append(f"[{cur}]fade=t=in:st=0:d=0.35:color=white[intro]")
-        cur = "intro"
-    elif job.intro == "fade_white":
-        g.append(f"[{cur}]fade=t=in:st=0:d=0.7:color=white[intro]")
-        cur = "intro"
-    elif job.intro == "fade_black":
-        g.append(f"[{cur}]fade=t=in:st=0:d=0.4[intro]")
+    io = intro_overlay(job.intro)
+    if io:
+        g.append(f"[{cur}]{io}[intro]")
         cur = "intro"
     if job.out_h and int(job.out_h) != H:
         oh = _even(job.out_h)
@@ -403,12 +416,21 @@ def preview_frame(job: RenderJob, t: float, out_png: str, width: int = 720) -> s
     src = str(Path(j.src).resolve())
     cx = _camera_at(j.camera, t)
     j.camera = [(0.0, cx)] if cx is not None else []
-    g = [f"[0:v]setpts=PTS-STARTPTS+{t:.3f}/TB[vsrc]"] + layout_graph(j)
-    cur = "base"
+    mo = motion_filters(j.motion, D, j.punch_times, j.intro, j.fps, at=t)
     grade = COLOR_GRADES.get(j.grade, COLOR_GRADES["none"])["vf"]
+    gs = re.search(r"unsharp=5:5:([\d.]+):5:5:0\.0,?", grade)
+    j._pre_motion, j._motion_done, j._sharp_used = mo, False, False
+    j._grade_sharp = float(gs.group(1)) * 0.6 if gs else 0.0
+    g = [f"[0:v]setpts=PTS-STARTPTS+{t:.3f}/TB[vsrc]"] + layout_graph(j)
+    if gs and j._sharp_used:
+        grade = grade.replace(gs.group(0), "").strip(",")
+    cur = "base"
     if grade:
         g.append(f"[{cur}]{grade}[graded]")
         cur = "graded"
+    if mo and not j._motion_done:
+        g.append(f"[{cur}]{mo}[moved]")
+        cur = "moved"
     if j.progress_bar and t > 0.05:
         g.append(f"[{cur}]drawbox=x=0:y=0:w={max(2, int(W * t / D))}:h=12:color=0x{j.accent.lstrip('#')}:t=fill[pbd]")
         cur = "pbd"
