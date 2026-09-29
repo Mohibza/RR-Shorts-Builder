@@ -424,6 +424,93 @@ def record(folder: str, filename: str, info: dict) -> None:
     save_meta(folder, meta)
 
 
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/128.0.0.0 Safari/537.36")
+
+
+def _candidates(track: Track) -> list[tuple[str, dict]]:
+    """Ways to fetch the file, best first. Music sites often refuse app-style requests (403) but serve the
+    same file to a normal browser request that comes 'from' the track's page, or from a mirror URL."""
+    urls = [track.download_url]
+    u = track.download_url
+    m = re.search(r"(?:trackid=|/track/)(\d+)", u)
+    if "jamendo" in u.lower() or "jamendo" in (track.source or "").lower() or "jamendo" in (track.page_url or ""):
+        tid = m.group(1) if m else (re.search(r"/track/(\d+)", track.page_url or "") or [None, None])[1]
+        if tid:
+            urls += [f"https://prod-1.storage.jamendo.com/download/track/{tid}/mp32/",
+                     f"https://prod-1.storage.jamendo.com/?trackid={tid}&format=mp32",
+                     f"https://mp3d.jamendo.com/download/track/{tid}/mp32/",
+                     f"https://mp3l.jamendo.com/?trackid={tid}&format=mp31"]
+    if u.startswith("http://"):
+        urls.append("https://" + u[7:])
+    elif u.startswith("https://"):
+        urls.append("http://" + u[8:])
+    if track.preview_url and track.preview_url not in urls:
+        urls.append(track.preview_url)
+    host = urllib.parse.urlparse(u)
+    origin = f"{host.scheme}://{host.netloc}/"
+    browser = {"User-Agent": BROWSER_UA, "Accept": "audio/*,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9",
+               "Referer": track.page_url or origin}
+    out, seen = [], set()
+    for url in urls:
+        for h in (browser, {**browser, "Referer": origin}, {"User-Agent": UA}):
+            key = (url, tuple(sorted(h.items())))
+            if url and key not in seen:
+                seen.add(key)
+                out.append((url, h))
+    return out
+
+
+def _fetch(url: str, headers: dict, tmp: Path, progress, cancel) -> None:
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=40) as r, open(tmp, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        ctype = r.headers.get("Content-Type", "")
+        if "text/html" in ctype:
+            raise SourceError("got a web page instead of audio")
+        got = 0
+        while True:
+            if cancel and cancel():
+                raise SourceError("Cancelled")
+            chunk = r.read(65536)
+            if not chunk:
+                break
+            f.write(chunk)
+            got += len(chunk)
+            if total:
+                progress(min(1.0, got / total))
+    if tmp.stat().st_size < 20_000:
+        raise SourceError("the download was empty")
+
+
+def _ytdlp(track: Track, dest: Path) -> bool:
+    """Last resort: yt-dlp knows how to fetch from Jamendo / ccMixter / Archive track pages."""
+    try:
+        import yt_dlp
+    except Exception:
+        return False
+    for src in [track.page_url, track.download_url]:
+        if not src:
+            continue
+        stem = dest.with_suffix("")
+        class _Quiet:
+            def debug(self, m): pass
+            warning = info = error = debug
+        opts = {"quiet": True, "no_warnings": True, "noplaylist": True, "format": "bestaudio/best", "logger": _Quiet(),
+                "outtmpl": str(stem) + ".%(ext)s", "http_headers": {"User-Agent": BROWSER_UA}}
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                info = y.extract_info(src, download=True)
+                got = Path(y.prepare_filename(info))
+            if got.exists() and got.stat().st_size > 20_000:
+                if got != dest:
+                    got.replace(dest.with_suffix(got.suffix))
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def download(track: Track, folder: str, progress: Callable[[float], None] = lambda f: None,
              cancel: Optional[Callable[[], bool]] = None) -> Path:
     """Download into the music folder and record licence + credit. Returns the saved file."""
@@ -434,31 +521,29 @@ def download(track: Track, folder: str, progress: Callable[[float], None] = lamb
         record(folder, dest.name, _info(track))
         return dest
     tmp = dest.with_suffix(dest.suffix + ".part")
-    req = urllib.request.Request(track.download_url, headers={"User-Agent": UA})
+    last = ""
     try:
-        with urllib.request.urlopen(req, timeout=40) as r, open(tmp, "wb") as f:
-            total = int(r.headers.get("Content-Length") or 0)
-            ctype = r.headers.get("Content-Type", "")
-            if "text/html" in ctype:
-                raise SourceError("That track can't be downloaded directly. Open its page instead.")
-            got = 0
-            while True:
-                if cancel and cancel():
-                    raise SourceError("Cancelled")
-                chunk = r.read(65536)
-                if not chunk:
-                    break
-                f.write(chunk)
-                got += len(chunk)
-                if total:
-                    progress(min(1.0, got / total))
-        if tmp.stat().st_size < 20_000:
-            raise SourceError("The download was empty or blocked. Try another track.")
-        tmp.replace(dest)
-    except urllib.error.HTTPError as e:
-        raise SourceError(f"Download failed ({e.code}). The file may have been removed. Try another track.")
-    except urllib.error.URLError as e:
-        raise SourceError(f"Download failed: {e.reason}")
+        for url, headers in _candidates(track):
+            try:
+                _fetch(url, headers, tmp, progress, cancel)
+                tmp.replace(dest)
+                break
+            except SourceError as e:
+                if str(e) == "Cancelled":
+                    raise
+                last = str(e)
+            except urllib.error.HTTPError as e:
+                last = f"HTTP {e.code}"
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                last = str(getattr(e, "reason", e))
+        else:
+            if not _ytdlp(track, dest):
+                raise SourceError(f"This track's site refused the download ({last}). Try another track, or open its "
+                                  "page and download it there: it goes straight into your music folder.")
+            done = [p for p in Path(folder).glob(dest.stem + ".*") if p.suffix.lower() in
+                    (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac", ".webm", ".aac")]
+            if done:
+                dest = done[0]
     except OSError as e:
         raise SourceError(f"Couldn't save the track in {folder} ({e.strerror or e}). Windows may be protecting "
                           "that folder; choose another music folder in Settings.")

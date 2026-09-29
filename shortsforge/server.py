@@ -857,6 +857,14 @@ def _make_handler(app: App):
             browser_login.open_in_browser(BROWSER_SOURCES[key][1], str(music_folder()))
         return True
 
+    def music_open_page(a):
+        url = str(a.get("url") or "")
+        if not url.startswith(("http://", "https://")):
+            raise ApiError("This track has no web page.")
+        from . import browser_login
+        browser_login.open_in_browser(url, str(music_folder()))
+        return True
+
     def music_tag(a):
         from . import music_sources
         s = Settings.load()
@@ -995,6 +1003,7 @@ def _make_handler(app: App):
         ("GET", "/api/music"): music_list,
         ("POST", "/api/music/search"): music_search,
         ("POST", "/api/music/download"): music_download,
+        ("POST", "/api/music/open_page"): music_open_page,
         ("POST", "/api/music/generate"): music_generate,
         ("GET", "/api/music/moods"): music_moods,
         ("POST", "/api/music/star"): music_star,

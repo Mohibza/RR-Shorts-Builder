@@ -48,7 +48,10 @@ export function MusicPage() {
   const download = async (t: any, star = false) => {
     setDl((d) => ({ ...d, [t.id]: "busy" }));
     try { await api("/api/music/download", { track: t, star }); setDl((d) => ({ ...d, [t.id]: "done" })); load(); toast(`Added “${t.title}”`, "ok"); }
-    catch (e: any) { setDl((d) => ({ ...d, [t.id]: "" })); toast(e.message, "error"); }
+    catch (e: any) {
+      setDl((d) => ({ ...d, [t.id]: "" }));
+      toast(e.message, "error", t.page_url ? { label: "Open page", run: () => { api("/api/music/open_page", { url: t.page_url }).catch(() => {}); } } : undefined);
+    }
   };
   const starred = lib?.tracks.filter((t) => t.starred).length || 0;
 
