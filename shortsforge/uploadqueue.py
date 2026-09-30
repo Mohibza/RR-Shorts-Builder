@@ -88,8 +88,11 @@ def next_slot(q: list[dict], platform: str, acc_id: str, s, now: Optional[float]
     return t
 
 
-def schedule(plan_file: str, s, platforms: Optional[list] = None, now: Optional[float] = None) -> list[dict]:
-    """Queue one Short for every enabled account of the chosen platforms. Returns the new jobs."""
+def schedule(plan_file: str, s, platforms: Optional[list] = None, now: Optional[float] = None,
+             direct: bool = False) -> list[dict]:
+    """Queue one Short for every enabled account of the chosen platforms. Returns the new jobs.
+    direct=True: post right away (no random gap, quiet hours or daily cap); each account still posts one
+    Short at a time, in the order they were queued."""
     data = json.loads(Path(plan_file).read_text(encoding="utf-8"))
     platforms = platforms if platforms is not None else list(getattr(s, "upload_platforms", []) or [])
     new = []
@@ -105,7 +108,8 @@ def schedule(plan_file: str, s, platforms: Optional[list] = None, now: Optional[
                 job = {"id": uuid.uuid4().hex[:12], "plan_file": plan_file, "video": data["output"],
                        "title": (data.get("meta") or {}).get("title", ""), "platform": p,
                        "account_id": acc["id"], "account": acc.get("name", ""), "status": "waiting",
-                       "due": next_slot(q, p, acc["id"], s, now), "attempts": 0, "error": "", "url": "",
+                       "due": (time.time() + 0.001 * len(q)) if direct else next_slot(q, p, acc["id"], s, now),
+                       "direct": direct, "attempts": 0, "error": "", "url": "",
                        "created": time.time()}
                 q.append(job)
                 new.append(job)
@@ -120,30 +124,65 @@ def meta_for(plan_file: str) -> dict:
             "hashtags": m.get("hashtags") or ["#shorts"]}
 
 
-def take_due(now: Optional[float] = None) -> Optional[dict]:
-    """Claim the next job that is due (marks it 'uploading')."""
+def _lane(j: dict, cache: dict) -> str:
+    k = (j["platform"], j["account_id"])
+    if k not in cache:
+        try:
+            cache[k] = publish.lane(*k)
+        except Exception:
+            cache[k] = f"api:{k[0]}:{k[1]}"
+    return cache[k]
+
+
+def take_due(now: Optional[float] = None, busy: Optional[set] = None) -> Optional[dict]:
+    """Claim the next job that is due (marks it 'uploading'), skipping lanes that are busy right now
+    and accounts that are switched off. The job gets a 'lane' key (see publish.lane)."""
     now = now or time.time()
+    busy = busy or set()
     with _lock:
         q = load()
         due = sorted((j for j in q if j["status"] == "waiting" and j["due"] <= now), key=lambda j: j["due"])
         if not due:
             return None
-        j = due[0]
-        j["status"] = "uploading"
-        j["started"] = now
-        save(q)
-        return dict(j)
+        try:
+            off = {(p, a.get("id")) for p, lst in publish.load_accounts().items() for a in lst
+                   if not a.get("enabled", True)}
+        except Exception:
+            off = set()
+        cache: dict = {}
+        for j in due:
+            if (j["platform"], j["account_id"]) in off:
+                continue
+            ln = _lane(j, cache)
+            if ln in busy:
+                continue
+            j.update(status="uploading", started=now, lane=ln)
+            save(q)
+            return dict(j)
+        return None
 
 
-def finish(job_id: str, ok: bool, result: Optional[dict] = None, error: str = "", retry: bool = False) -> dict:
+def next_due() -> Optional[float]:
+    """When the next waiting job is due (for the status line)."""
+    ts = [j["due"] for j in load() if j["status"] == "waiting"]
+    return min(ts) if ts else None
+
+
+def finish(job_id: str, ok: bool, result: Optional[dict] = None, error: str = "", retry: bool = False,
+           wait: float = 0) -> dict:
     with _lock:
         q = load()
         for j in q:
             if j["id"] != job_id:
                 continue
+            j.pop("lane", None)
             if ok:
                 j.update(status="done", done_at=time.time(), url=(result or {}).get("url", ""),
-                         note=(result or {}).get("note", ""), error="")
+                         note=(result or {}).get("note", ""), error="", waits=0)
+            elif wait and retry and j.get("waits", 0) < 60:
+                # "busy right now" (browser window open, another upload on the same account): try again soon
+                # without using up one of the real attempts
+                j.update(status="waiting", due=time.time() + wait, error=error, waits=j.get("waits", 0) + 1)
             else:
                 j["attempts"] = j.get("attempts", 0) + 1
                 j["error"] = error
@@ -168,6 +207,7 @@ def recover() -> None:
             if j["status"] == "uploading":
                 j["status"] = "waiting"
                 j["due"] = time.time() + 60
+                j.pop("lane", None)
                 changed = True
         if changed:
             save(q)
@@ -187,6 +227,55 @@ def remove(job_id: str) -> None:
         save([j for j in load() if j["id"] != job_id])
 
 
+def retry_failed() -> int:
+    """Put every failed job back in line (spaced a few minutes apart per account)."""
+    with _lock:
+        q = load()
+        n, per = 0, {}
+        now = time.time()
+        for j in sorted(q, key=lambda x: x.get("due", 0)):
+            if j["status"] == "failed":
+                k = (j["platform"], j["account_id"])
+                j.update(status="waiting", attempts=0, waits=0, error="", due=now + 5 + per.get(k, 0))
+                per[k] = per.get(k, 0) + random.uniform(3, 8) * 60
+                n += 1
+        save(q)
+        return n
+
+
+def post_all_now() -> int:
+    """Make every waiting job due now (each account still posts one at a time)."""
+    with _lock:
+        q = load()
+        n = 0
+        for j in q:
+            if j["status"] == "waiting":
+                j["due"] = time.time()
+                n += 1
+        save(q)
+        return n
+
+
+def drop_plan(plan_file: str) -> list[dict]:
+    """A Short was deleted: take its not-yet-posted jobs out of the queue. Returns jobs still posting."""
+    with _lock:
+        q = load()
+        keep, posting = [], []
+        for j in q:
+            if j["plan_file"] == plan_file and j["status"] in ("waiting", "failed"):
+                continue
+            if j["plan_file"] == plan_file and j["status"] == "uploading":
+                posting.append(j)
+            keep.append(j)
+        save(keep)
+        return posting
+
+
+def clear_failed() -> None:
+    with _lock:
+        save([j for j in load() if j["status"] != "failed"])
+
+
 def clear_finished() -> None:
     with _lock:
         save([j for j in load() if j["status"] not in ("done",)])
@@ -199,7 +288,7 @@ def run_job(job: dict, s, progress=lambda f: None) -> dict:
                              progress)
         return finish(job["id"], True, res)
     except publish.PublishError as e:
-        return finish(job["id"], False, error=str(e), retry=e.retry)
+        return finish(job["id"], False, error=str(e), retry=e.retry, wait=getattr(e, "wait", 0))
     except FileNotFoundError:
         return finish(job["id"], False, error="The Short's files were moved or deleted.", retry=False)
     except Exception as e:  # unexpected: keep the queue alive, retry a few times

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import http.server
 import json
 import secrets
@@ -59,9 +60,10 @@ CANCEL = threading.Event()      # set by the UI to stop waiting for a browser si
 class PublishError(RuntimeError):
     """Upload/sign-in problem with a message fit to show the user."""
 
-    def __init__(self, msg: str, retry: bool = False):
+    def __init__(self, msg: str, retry: bool = False, wait: float = 0):
         super().__init__(msg)
         self.retry = retry          # temporary (network, 5xx, rate limit): try again later
+        self.wait = wait            # >0: "busy right now" - try again after `wait` s without using up an attempt
 
 
 # ================================================================ secure storage (Windows DPAPI)
@@ -92,10 +94,14 @@ def save_accounts(data: dict) -> None:
 def _upsert(platform: str, acc: dict) -> dict:
     with _lock:
         data = load_accounts()
-        lst = [a for a in data[platform] if a.get("id") != acc["id"]]
-        old = next((a for a in data[platform] if a.get("id") == acc["id"]), {})
-        acc = {"enabled": old.get("enabled", True), **acc}
-        lst.append(acc)
+        lst = list(data[platform])
+        i = next((n for n, a in enumerate(lst) if a.get("id") == acc["id"]), None)
+        old = lst[i] if i is not None else {}
+        acc = {**old, "enabled": old.get("enabled", True), **acc}   # keep settings like the proxy
+        if i is None:
+            lst.append(acc)
+        else:
+            lst[i] = acc                                             # keep the account's place in the list
         data[platform] = lst
         save_accounts(data)
         return acc
@@ -635,6 +641,16 @@ def connect(platform: str, s, open_browser=webbrowser.open):
     if platform == "instagram":
         return instagram_connect(s.fb_app_id, s.fb_app_secret, open_browser)
     return tiktok_connect(s.tt_client_key, s.tt_client_secret, open_browser)
+
+
+def lane(platform: str, acc_id: str) -> str:
+    """Uploads in the same lane run one after another; different lanes may run at the same time.
+    Browser accounts share a lane when they share a browser profile; API accounts get one lane each."""
+    acc = next((a for a in load_accounts().get(platform, []) if a.get("id") == acc_id), None)
+    if acc and acc.get("mode") == "browser":
+        from . import webupload
+        return "profile:" + os.path.normcase(str(webupload.profile_dir(acc)))
+    return f"api:{platform}:{acc_id}"
 
 
 def upload(platform: str, acc_id: str, video: str, meta: dict, s, progress: Progress = lambda f: None) -> dict:

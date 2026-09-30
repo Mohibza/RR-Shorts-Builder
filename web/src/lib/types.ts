@@ -58,17 +58,17 @@ export type ExportTask = {
   error: string; path: string; thumb: string; plan_file: string; created: number;
 };
 
-export type Account = { id: string; name: string; mode: string; enabled: boolean; profile: boolean };
+export type Account = { id: string; name: string; mode: string; enabled: boolean; profile: boolean; proxy?: string; proxy_host?: string };
 
 export type QueueJob = {
   id: string; plan_file: string; video: string; title: string; platform: string; account_id: string;
   account: string; status: string; due: number; attempts: number; error: string; url: string;
-  note?: string; done_at?: number; frac?: number;
+  note?: string; done_at?: number; frac?: number; waits?: number; lane?: string; started?: number;
 };
 
 export type Status = {
   version: string; ffmpeg: boolean; fonts_missing: number; yt_login: boolean; running: number; exporting: number;
-  uploads_waiting: number; watching: number; auto_upload: boolean; ai: string; license: boolean;
+  uploads_waiting: number; uploads_active?: number; uploads_paused?: boolean; watching: number; auto_upload: boolean; ai: string; license: boolean;
   trial?: { status: string; left: number | null; plan: string | null; expires_at: number | null } | null;
 };
 

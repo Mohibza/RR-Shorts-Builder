@@ -209,6 +209,9 @@ class Settings:
     upload_quiet_end: int = 8
     yt_privacy: str = "public"       # public | unlisted | private
     tiktok_audited: bool = False
+    upload_parallel: int = 2         # uploads at the same time (different accounts only; one per account)
+    upload_paused: bool = False      # hold the whole queue
+    upload_timeout_min: int = 0      # close a stuck upload browser after this long (0 = automatic per platform)
     web_upload_visible: bool = False # show the browser window during direct-sign-in uploads     # TikTok approved your app -> public posts (else "only me")
     yt_client_id: str = ""
     yt_client_secret: str = ""

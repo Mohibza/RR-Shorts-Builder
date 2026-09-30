@@ -72,6 +72,8 @@ class Engine:
         self._aq: "queue.Queue[Optional[str]]" = queue.Queue()
         self._eq: "queue.Queue[Optional[str]]" = queue.Queue()
         self._upload_kick = threading.Event()
+        self._up_active: dict[str, str] = {}         # lane -> job id of uploads running now
+        self._up_lock = threading.Lock()
         self._stop = threading.Event()
         self._signins: dict[str, dict] = {}
         self._watching = threading.Lock()
@@ -148,7 +150,8 @@ class Engine:
         return {"version": __version__, "ffmpeg": ff, "fonts_missing": miss, "yt_login": cookies.has_login(),
                 "running": sum(1 for j in self.jobs.values() if j["state"] in ("queued", "running")),
                 "exporting": sum(1 for e in self.exports.values() if e["state"] in ("queued", "running")),
-                "uploads_waiting": waiting, "watching": len(s.watch_channels or []) if s.watch_enabled else 0,
+                "uploads_waiting": waiting, "uploads_active": len(self._up_active),
+                "uploads_paused": bool(getattr(s, "upload_paused", False)), "watching": len(s.watch_channels or []) if s.watch_enabled else 0,
                 "auto_upload": bool(s.auto_upload), "ai": s.clip_picker if (
                     (s.clip_picker == "gemini" and s.gemini_api_key) or
                     (s.clip_picker == "claude" and s.anthropic_api_key) or
@@ -438,14 +441,17 @@ class Engine:
         self.bus.emit("queue", {})
         self._upload_kick.set()
 
-    def upload_now(self, plan_file: str, platforms: Optional[list] = None) -> list[dict]:
+    def upload_now(self, plan_file: str, platforms: Optional[list] = None, direct: Optional[bool] = None) -> list[dict]:
+        """Post a Short. direct (default: when Auto-post is off) = right away instead of on the natural schedule."""
         from . import publish, uploadqueue
         s = Settings.load()
         plats = platforms or [p for p in (s.upload_platforms or []) if publish.enabled_accounts(p)] or \
             [p for p in publish.PLATFORMS if publish.enabled_accounts(p)]
         if not plats:
             raise ValueError("Connect an account on the Publish page first.")
-        jobs = uploadqueue.schedule(plan_file, s, plats)
+        if direct is None:
+            direct = not getattr(s, "auto_upload", False)
+        jobs = uploadqueue.schedule(plan_file, s, plats, direct=direct)
         self.bus.emit("queue", {})
         self._upload_kick.set()
         return jobs
@@ -455,35 +461,79 @@ class Engine:
         self._upload_kick.set()
 
     def _upload_loop(self) -> None:
-        from . import uploadqueue
+        """Dispatcher: runs up to `upload_parallel` uploads at once, one per account browser / API account."""
+        from . import browser_login, uploadqueue
         try:
             uploadqueue.recover()
         except Exception:
             pass
+        try:
+            n = browser_login.cleanup_stale()
+            if n:
+                self.bus.log(f"Closed {n} stuck upload browser(s) left from last time")
+        except Exception:
+            pass
         while not self._stop.is_set():
-            try:
-                job = uploadqueue.take_due()
-            except Exception:
-                job = None
-            if job:
-                self.bus.emit("upload", {**job, "frac": 0.0})
+            s = Settings.load()
+            limit = max(1, min(4, int(getattr(s, "upload_parallel", 2) or 1)))
+            started = False
+            while not getattr(s, "upload_paused", False) and len(self._up_active) < limit:
+                try:
+                    with self._up_lock:
+                        job = uploadqueue.take_due(busy=set(self._up_active))
+                        if job:
+                            self._up_active[job["lane"]] = job["id"]
+                except Exception as e:
+                    self.bus.log(f"Upload queue problem: {_first_line(e)}")
+                    job = None
+                if not job:
+                    break
+                started = True
+                threading.Thread(target=self._upload_one, args=(job, s), name=f"upload-{job['id']}",
+                                 daemon=True).start()
+            if started:
                 self.bus.emit("queue", {})
-                s = Settings.load()
-                res = uploadqueue.run_job(job, s, lambda f, j=job: self._upload_prog(j, f))
-                j = res or job
-                name = f"{j.get('platform', '')} · {j.get('account', '')}"
-                if j.get("status") == "done":
-                    self.bus.log(f"✔ Uploaded “{j.get('title', '')[:50]}” to {name}"
-                                 + (f" ({j['note']})" if j.get("note") else ""))
-                elif j.get("status") == "failed":
-                    self.bus.log(f"✕ Upload to {name} failed: {j.get('error', '')}")
-                elif j.get("error"):
-                    self.bus.log(f"Upload to {name} will retry: {j.get('error', '')}")
-                self.bus.emit("queue", {})
-                self.bus.emit("status", self.status())
-                continue
-            self._upload_kick.wait(20)
+            self._upload_kick.wait(15)
             self._upload_kick.clear()
+
+    def _upload_one(self, job: dict, s: Settings) -> None:
+        from . import uploadqueue
+        name = f"{job.get('platform', '')} · {job.get('account', '')}"
+        try:
+            self.bus.emit("upload", {**job, "frac": 0.0})
+            res = uploadqueue.run_job(job, s, lambda f, j=job: self._upload_prog(j, f))
+            j = res or job
+            if j.get("status") == "done":
+                self.bus.log(f"✔ Uploaded “{j.get('title', '')[:50]}” to {name}"
+                             + (f" ({j['note']})" if j.get("note") else ""))
+            elif j.get("status") == "failed":
+                self.bus.log(f"✕ Upload to {name} failed: {j.get('error', '')}")
+            elif j.get("error") and not j.get("waits"):
+                self.bus.log(f"Upload to {name} will retry: {j.get('error', '')}")
+        except Exception as e:           # run_job never raises, but never lose a lane either
+            self.bus.log(f"Upload to {name} crashed: {_first_line(e)}")
+            try:
+                uploadqueue.finish(job["id"], False, error=_first_line(e), retry=True)
+            except Exception:
+                pass
+        finally:
+            with self._up_lock:
+                self._up_active.pop(job.get("lane", ""), None)
+            self._last_prog.pop("u" + job["id"], None)
+            self.bus.emit("queue", {})
+            self.bus.emit("status", self.status())
+            self._upload_kick.set()
+
+    def stop_upload(self, job_id: str) -> bool:
+        """Stop button on a job that is posting right now."""
+        from . import publish, uploadqueue, webupload
+        j = next((x for x in uploadqueue.load() if x["id"] == job_id), None)
+        if not j or j["status"] != "uploading":
+            return False
+        acc = next((a for a in publish.load_accounts().get(j["platform"], []) if a.get("id") == j["account_id"]), None)
+        if acc and acc.get("mode") == "browser":
+            return webupload.stop(acc)
+        raise ValueError("Uploads through developer keys can't be stopped halfway; it finishes in a moment.")
 
     def _upload_prog(self, job: dict, f: float) -> None:
         now = time.time()
@@ -548,20 +598,41 @@ class Engine:
         acc = next((a for a in accs if a.get("id") == acc_id), None) if acc_id else None
         name = webupload.NICE[platform]
         if acc:
-            ses.update(key=acc.get("profile", ""), new=False, label=label or acc.get("name", ""))
+            ses.update(key=acc.get("profile", ""), new=False, label=label or acc.get("name", ""),
+                       proxy=acc.get("proxy", ""))
         elif platform == "youtube" and not any(a.get("id") == "browser" for a in accs):
             ses.update(key="", label=label or "YouTube (main)")
         else:
             ses.update(key=webupload.new_profile_key(platform),
                        label=label or f"{name} {sum(1 for a in accs if a.get('mode') == 'browser') + 1}")
         self._signins[sid] = ses
+        if ses["new"] and ses["key"] and not (webupload.PROFILES / ses["key"]).exists():
+            # brand-new account: nothing to check yet (and no browser start before its proxy is chosen)
+            ses.update(state="ready", msg="Optional: add a proxy below. Then click “Open sign-in window”.")
+            self.bus.emit("signin", self._pub(ses))
+            return self._pub(ses)
         self.bus.emit("signin", self._pub(ses))
         self._signin_check(ses)
         return self._pub(ses)
 
+    def signin_proxy(self, sid: str, text: str) -> dict:
+        """Set the proxy of the account being signed in (before its window opens)."""
+        from . import proxy as px, webupload
+        ses = self._signins[sid]
+        if ses["platform"] == "ytdl":
+            raise ValueError("The YouTube download login doesn't use a proxy.")
+        ses["proxy"] = px.normalize(text)          # raises ProxyError with a friendly message
+        if ses.get("ok") and not ses["new"]:
+            webupload.register(ses["platform"], ses["key"], ses.get("label", ""), ses["proxy"])
+            self.bus.emit("accounts", {})
+        return self._pub(ses)
+
     @staticmethod
     def _pub(ses: dict) -> dict:
-        return {k: v for k, v in ses.items() if k not in ("proc",)}
+        from . import proxy as px
+        out = {k: v for k, v in ses.items() if k not in ("proc", "proxy")}
+        out["proxy"] = px.display(ses.get("proxy", ""))      # never send the proxy password to the page
+        return out
 
     def _profile(self, ses: dict):
         from . import webupload
@@ -577,13 +648,14 @@ class Engine:
                     n = browser_login.harvest()
                     ok = n > 0 and cookies.has_login()
                 else:
-                    ok = webupload.check_login(ses["platform"], self._profile(ses))
+                    ok = webupload.check_login(ses["platform"], self._profile(ses), ses.get("proxy", ""))
                 err = ""
             except Exception as e:
                 ok, err = False, _first_line(e)
             if ok:
                 if ses["platform"] != "ytdl":
-                    webupload.register(ses["platform"], ses["key"], ses.get("label", ""))
+                    webupload.register(ses["platform"], ses["key"], ses.get("label", ""),
+                                       ses["proxy"] if "proxy" in ses else None)
                     self.bus.emit("accounts", {})
                 ses.update(ok=True, state="ok", msg="✓ Signed in. The app will use this login from now on.")
             elif err:
@@ -600,7 +672,7 @@ class Engine:
         if ses["platform"] == "ytdl":
             proc = browser_login.open_sign_in()
         else:
-            proc = webupload.open_sign_in(ses["platform"], self._profile(ses))
+            proc = webupload.open_sign_in(ses["platform"], self._profile(ses), ses.get("proxy", ""))
         ses["proc"] = proc
         ses.update(state="open", msg="Log in in the browser window, then click Finish (or just close that window).")
         self.bus.emit("signin", self._pub(ses))
@@ -683,9 +755,11 @@ class Engine:
 
 def accounts_view() -> dict:
     """Connected accounts without tokens (safe to send to the interface)."""
-    from . import publish
+    from . import proxy as px, publish
     out = {}
     for p, lst in publish.load_accounts().items():
         out[p] = [{"id": a.get("id"), "name": a.get("name", ""), "mode": a.get("mode", "api"),
-                   "enabled": a.get("enabled", True), "profile": bool(a.get("profile"))} for a in lst]
+                   "enabled": a.get("enabled", True), "profile": bool(a.get("profile")),
+                   "proxy": px.display(a.get("proxy", "")), "proxy_host": px.endpoint(a.get("proxy", ""))}
+                  for a in lst]
     return out

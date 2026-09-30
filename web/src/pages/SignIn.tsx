@@ -3,6 +3,7 @@ import { api } from "../lib/api";
 import { toast, useStore } from "../lib/store";
 import { Icon } from "../components/Icon";
 import { Btn, Modal, Text } from "../components/ui";
+import { ProxyField } from "../components/ProxyField";
 
 const HINT: Record<string, string> = {
   ytdl: "YouTube sometimes asks downloaders to prove they're not a bot. Sign in once in the app's own browser window and the app keeps the login fresh.",
@@ -32,7 +33,16 @@ export function SignInModal({ platform, account, onClose }: { platform: string; 
   const state = ses?.state || "checking";
   const ok = state === "ok";
   useEffect(() => { if (ok) toast(`Signed in to ${NAME[platform]}`, "ok"); }, [ok]);
-  const call = (path: string) => api(path, { id: sid, label: platform === "ytdl" ? undefined : label }).catch((e) => setErr(e.message));
+  const [proxy, setProxy] = useState("");
+  const [useProxy, setUseProxy] = useState(false);
+  const call = async (path: string) => {
+    try {
+      setErr("");
+      if (path === "/api/signin/open" && platform !== "ytdl" && useProxy && proxy.trim())
+        await api("/api/signin/proxy", { id: sid, proxy: proxy.trim() });   // proxy first, then the window
+      await api(path, { id: sid, label: platform === "ytdl" ? undefined : label });
+    } catch (e: any) { setErr(e.message); }
+  };
   const done = async () => {
     if (platform !== "ytdl" && sid) await api("/api/signin/label", { id: sid, label }).catch(() => {});
     onClose();
@@ -55,6 +65,13 @@ export function SignInModal({ platform, account, onClose }: { platform: string; 
       {platform !== "ytdl" && (
         <div className="field"><div className="field-label">Account name (shown in the app)</div>
           <Text value={label} onChange={setLabel} placeholder="e.g. Main channel, Urdu page, @myhandle" /></div>
+      )}
+      {platform !== "ytdl" && !ok && (
+        <div className="field"><label className="check-row"><input type="checkbox" checked={useProxy} onChange={(e) => setUseProxy(e.target.checked)} />
+          <span>{ses?.proxy ? <>Change proxy <span className="muted">(now: {ses.proxy})</span></> : <>Use a proxy for this account <span className="muted">(optional, for running several accounts)</span></>}</span></label>
+          {useProxy && <ProxyField value={proxy} onChange={setProxy} saved={ses?.proxy || undefined} />}
+          {useProxy && <small className="muted">Set it before “Open sign-in window”. The login then happens through the proxy.</small>}
+        </div>
       )}
       <div className={`signin-status st-${state}`}>
         {state === "checking" || state === "closing" ? <span className="spin" /> : <Icon name={ok ? "check" : state === "error" ? "alert" : "info"} size={16} />}

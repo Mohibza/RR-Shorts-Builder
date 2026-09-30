@@ -35,8 +35,35 @@ FREE_SHORTS = 3
 PLANS = {1: ("monthly", "Monthly"), 2: ("annual", "Annual"), 3: ("lifetime", "Lifetime")}
 EPOCH = 1704067200            # 2024-01-01: key dates are days since then
 GRACE_DAYS = 3                # a subscription keeps working this long after its end date
-# Later: your website's license API. Empty = offline only.
-ONLINE_URL = os.environ.get("RRSF_LICENSE_SERVER", "").rstrip("/")
+ONLINE_CHECK_HOURS = 12      # a subscription is re-checked with the license server this often
+ONLINE_GRACE_DAYS = 7        # ...and keeps working this long without internet
+
+
+def online_url() -> str:
+    """Your license server (license-server/). Set ONLINE_URL in license_pub.py; empty = offline only."""
+    env = os.environ.get("RRSF_LICENSE_SERVER", "").strip()
+    if env:
+        return env.rstrip("/")
+    try:
+        from .license_pub import ONLINE_URL
+        return (ONLINE_URL or "").strip().rstrip("/")
+    except Exception:
+        return ""
+
+
+def _post(path: str, body: dict, timeout: float = 6.0) -> Optional[dict]:
+    """None = server not reachable (then the offline rules apply)."""
+    url = online_url()
+    if not url:
+        return None
+    import urllib.request
+    try:
+        req = urllib.request.Request(url + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return None
 _SALT = bytes.fromhex("5b1e7a0c93d24f6e8a41c0de77f3a219")   # part of the state key (with this PC's id)
 _lock = threading.Lock()
 
@@ -300,6 +327,8 @@ class State:
     last: float = 0.0                            # latest time the app saw (clock-rollback check)
     key: str = ""
     tampered: bool = False
+    srv_ok: float = 0.0                          # last time the license server confirmed the key
+    revoked: str = ""                            # key cancelled on the server
 
 
 def _load() -> State:
@@ -325,6 +354,8 @@ def _load() -> State:
         if d.get("first"):
             firsts.append(float(d["first"]))
         st.last = max(st.last, float(d.get("last") or 0))
+        st.srv_ok = max(st.srv_ok, float(d.get("srv") or 0))
+        st.revoked = st.revoked or str(d.get("rev") or "")
         if d.get("key") and float(d.get("kt") or 0) >= kt:
             st.key, kt = d["key"], float(d.get("kt") or 0)
     st.first = min(firsts) if firsts else 0.0
@@ -334,6 +365,7 @@ def _load() -> State:
 
 def _save(st: State) -> None:
     blob = _seal({"used": st.used[-50:], "first": st.first, "last": st.last, "key": st.key,
+                  "srv": st.srv_ok, "rev": st.revoked,
                   "kt": getattr(st, "_kt", time.time()) if st.key else 0, "v": 2})
     for f in _files():
         try:
@@ -372,6 +404,9 @@ def _evaluate(st: State) -> LicenseState:
     if st.last and now < st.last - 36 * 3600:
         ls.status = "clock"
         ls.message = "Your PC's date looks wrong (it went back in time). Set the correct date and time to continue."
+        return ls
+    if st.key and st.revoked and st.revoked == st.key[-12:]:
+        ls.status, ls.message = "expired", "This key was cancelled. Contact support for a new one."
         return ls
     if st.key:
         try:
@@ -419,6 +454,7 @@ def reserve(slot: str, consume: bool = True) -> Optional[str]:
             raise LicenseError(ls.message)
         if ls.status == "active":
             if consume:
+                _online_key_check(st)
                 _touch(st)
                 _save(st)
             return None
@@ -435,10 +471,44 @@ def reserve(slot: str, consume: bool = True) -> Optional[str]:
                                f"your key in Settings → License to keep going. Your Device ID: {device_id()}")
         if not consume:
             return None
+        r = _post("/v1/trial", {"device": device_bytes().hex(), "slot": h})
+        if r is not None and not r.get("ok", True):
+            while len(st.used) < FREE_SHORTS:                 # the server says this PC's trial is used up
+                st.used.append(secrets.token_hex(8))
+            _touch(st)
+            _save(st)
+            raise LicenseError(f"Your {FREE_SHORTS} free Shorts on this PC are used up. Subscribe (monthly or annual) "
+                               f"and enter your key in Settings → License. Your Device ID: {device_id()}")
         st.used.append(h)
         _touch(st)
         _save(st)
         return h
+
+
+def _online_key_check(st: State) -> None:
+    """With a license server: confirm the key isn't cancelled (every ONLINE_CHECK_HOURS); without
+    internet it keeps working for ONLINE_GRACE_DAYS since the last confirmation."""
+    if not online_url() or not st.key:
+        return
+    now = time.time()
+    if now - st.srv_ok < ONLINE_CHECK_HOURS * 3600:
+        return
+    try:
+        k = unpack(decode_key(st.key)[0])
+    except LicenseError:
+        return
+    from . import __version__
+    r = _post("/v1/check", {"device": device_bytes().hex(), "kid": k.kid, "version": __version__})
+    if r is None:
+        since = max(st.srv_ok, getattr(st, "_kt", 0.0) or 0.0, st.first)
+        if now - since > ONLINE_GRACE_DAYS * 86400:
+            raise LicenseError("Please connect to the internet once so your subscription can be confirmed.", "offline")
+        return
+    if not r.get("ok", True):
+        st.revoked = st.key[-12:]
+        _save(st)
+        raise LicenseError(r.get("message") or "This key was cancelled. Contact support.")
+    st.srv_ok = now
 
 
 def release(token: Optional[str]) -> None:
@@ -460,6 +530,9 @@ def redeem(text: str) -> LicenseState:
         st.key = encode_key(*decode_key(text))
         st._kt = time.time()   # type: ignore[attr-defined]
         st.tampered = False
+        st.revoked = ""
+        st.srv_ok = 0.0
+        _online_key_check(st)              # a cancelled key is refused right away when a server is set
         _touch(st)
         _save(st)
         ls = _evaluate(st)

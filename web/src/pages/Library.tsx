@@ -16,6 +16,19 @@ export function LibraryPage() {
   const [post, setPost] = useState<string[] | null>(null);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const load = () => get<LibItem[]>("/api/library").then(setItems).catch((e) => toast(e.message, "error"));
+  const [delBusy, setDelBusy] = useState(false);
+  const delMany = async (plans: string[]) => {
+    if (!plans.length) return;
+    if (!confirm(plans.length === 1 ? "Delete this Short from your computer? Its waiting posts are removed too." : `Delete ${plans.length} Shorts from your computer? Their waiting posts are removed too.`)) return;
+    setDelBusy(true);
+    try {
+      const r = await api<{ deleted: number; posting: number; failed: number }>("/api/library/delete_many", { plan_files: plans });
+      toast(`Deleted ${r.deleted} Short${r.deleted === 1 ? "" : "s"}` + (r.posting ? ` · ${r.posting} kept (posting right now)` : "") + (r.failed ? ` · ${r.failed} couldn't be deleted` : ""), r.posting || r.failed ? "info" : "ok");
+      setSel(new Set());
+      load();
+    } catch (e: any) { toast(e.message, "error"); }
+    setDelBusy(false);
+  };
   useEffect(() => { load(); }, [tick]);
   const list = useMemo(() => (items || []).filter((i) => !q || (i.meta.title || i.hook_text || "").toLowerCase().includes(q.toLowerCase()) || i.source_title.toLowerCase().includes(q.toLowerCase())), [items, q]);
   if (!items) return <div className="page center"><span className="spin big" /></div>;
@@ -26,6 +39,11 @@ export function LibraryPage() {
         <div className="row gap">
           <div className="search"><Icon name="search" size={16} /><input value={q} placeholder="Search titles" onChange={(e) => setQ(e.target.value)} /></div>
           <Btn icon="folder" onClick={() => api("/api/open", { path: "output" })}>Open folder</Btn>
+          {items.length > 0 && <div className="lib-sel-bar">
+            {sel.size < list.length ? <Btn small kind="ghost" icon="check" onClick={() => setSel(new Set(list.map((i) => i.plan_file)))}>Select all{q ? " shown" : ""}</Btn>
+              : <Btn small kind="ghost" icon="x" onClick={() => setSel(new Set())}>Clear selection</Btn>}
+            {sel.size > 0 && <Btn small kind="danger" icon="trash" busy={delBusy} onClick={() => delMany([...sel])}>Delete {sel.size}</Btn>}
+          </div>}
           {sel.size > 0 && <Btn kind="primary" icon="rocket" onClick={() => setPost([...sel])}>Post {sel.size}</Btn>}
         </div>
       </div>
@@ -48,6 +66,7 @@ export function LibraryPage() {
                   <Btn small kind="primary" icon="rocket" onClick={() => setPost([it.plan_file])}>Post</Btn>
                   {it.project_ref && <IconBtn icon="edit" title="Edit again" onClick={() => setState({ editing: { project: it.project_ref!.project, clip: it.project_ref!.clip } })} />}
                   <IconBtn icon="folder" title="Show file" onClick={() => api("/api/open", { path: it.output, select: true })} />
+                  <IconBtn icon="trash" danger title="Delete this Short" onClick={() => delMany([it.plan_file])} />
                 </div>
               </div>
             </div>
@@ -73,9 +92,9 @@ function ShortModal({ it, onClose, onChanged, onPost }: { it: LibItem; onClose: 
     setBusy(false);
   };
   const del = async () => {
-    if (!confirm("Delete this Short from your computer?")) return;
-    await api("/api/library/delete", { plan_file: it.plan_file });
-    onChanged(); onClose();
+    if (!confirm("Delete this Short from your computer? Its waiting posts are removed too.")) return;
+    try { await api("/api/library/delete", { plan_file: it.plan_file }); onChanged(); onClose(); }
+    catch (e: any) { toast(e.message, "error"); }
   };
   return (
     <Modal title={it.meta.title || "Short"} onClose={onClose} width={900} footer={<>
@@ -104,12 +123,13 @@ export function PostDialog({ plans, onClose }: { plans: string[]; onClose: () =>
   const [plats, setPlats] = useState<string[]>(() => (settings.upload_platforms || []).filter((p: string) => avail.includes(p)).length
     ? (settings.upload_platforms || []).filter((p: string) => avail.includes(p)) : avail);
   const [busy, setBusy] = useState(false);
+  const [direct, setDirect] = useState<boolean>(!settings.auto_upload);
   const go_ = async () => {
     setBusy(true);
     let n = 0;
     try {
-      for (const pf of plans) { const r = await api<any[]>("/api/library/upload", { plan_file: pf, platforms: plats }); n += r.length; }
-      toast(n ? `Scheduled ${n} upload${n > 1 ? "s" : ""}. Watch progress on the Publish page.` : "Already queued or posted to those accounts.", n ? "ok" : "info",
+      for (const pf of plans) { const r = await api<any[]>("/api/library/upload", { plan_file: pf, platforms: plats, direct }); n += r.length; }
+      toast(n ? (direct ? `Posting ${n} upload${n > 1 ? "s" : ""} now. Watch progress on the Publish page.` : `Scheduled ${n} upload${n > 1 ? "s" : ""}. Watch progress on the Publish page.`) : "Already queued or posted to those accounts.", n ? "ok" : "info",
         n ? { label: "Open Publish", run: () => go("publish", { editing: null }) } : undefined);
       onClose();
     } catch (e: any) { toast(e.message, "error"); }
@@ -118,12 +138,15 @@ export function PostDialog({ plans, onClose }: { plans: string[]; onClose: () =>
   return (
     <Modal title={`Post ${plans.length > 1 ? plans.length + " Shorts" : "this Short"}`} onClose={onClose} width={520} footer={<>
       <Btn kind="ghost" onClick={onClose}>Cancel</Btn>
-      <Btn kind="primary" icon="rocket" busy={busy} disabled={!plats.length} onClick={go_}>Schedule</Btn></>}>
+      <Btn kind="primary" icon="rocket" busy={busy} disabled={!plats.length} onClick={go_}>{direct ? "Post now" : "Schedule"}</Btn></>}>
       {!avail.length ? (
         <div className="empty small"><p>No accounts connected yet.</p><Btn kind="primary" icon="user" onClick={() => { onClose(); go("publish", { editing: null }); }}>Connect accounts</Btn></div>
       ) : (
         <>
-          <p className="muted">Uploads go out one by one with a random gap ({settings.upload_gap_min}–{settings.upload_gap_max} min) so they look natural. Quiet hours and daily limits apply (Publish page).</p>
+          <div className="post-mode">
+            <button className={direct ? "on" : ""} onClick={() => setDirect(true)}><b>Post right away</b><small>Starts now. Each account posts one at a time.</small></button>
+            <button className={!direct ? "on" : ""} onClick={() => setDirect(false)}><b>Spread out naturally</b><small>Random {settings.upload_gap_min}–{settings.upload_gap_max} min gaps, quiet hours and daily limits.</small></button>
+          </div>
           <div className="plat-pick">
             {avail.map((p) => (
               <button key={p} className={`plat ${plats.includes(p) ? "on" : ""}`} onClick={() => setPlats(plats.includes(p) ? plats.filter((x) => x !== p) : [...plats, p])}>

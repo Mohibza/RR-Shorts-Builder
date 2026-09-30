@@ -477,6 +477,12 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px;
 .qrow .plat-ic { background: linear-gradient(135deg, #3a3558, #25223d); }
 .qrow.st-uploading { border-color: rgba(46,229,157,.4); }
 .qrow.st-failed small { color: #ff9aa5; }
+.qrow.off { opacity: .55; }
+.pub-right .sec-head { gap: 8px; flex-wrap: wrap; }
+.pub-right .sec-head h2 { margin-right: auto; }
+.q-banner { display: flex; align-items: center; gap: 8px; padding: 8px 11px; margin-bottom: 8px; border-radius: 10px; font-size: 12.5px;
+  background: rgba(46,229,157,.08); border: 1px solid rgba(46,229,157,.3); color: #bff5dc; }
+.q-banner.warn { background: rgba(255,196,77,.08); border-color: rgba(255,196,77,.35); color: #ffe2a6; }
 .qmain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .qmain b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .95em; }
 .qmain small { color: var(--muted); font-size: .8em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -589,3 +595,21 @@ code.devid { font-size: 1.05em; letter-spacing: .06em; padding: 8px 12px; border
 .side-status .ss-row.trial.ok { color: #5fe3a1; } .side-status .ss-row.trial.bad { color: #ff6b81; }
 .trend-note { margin: 0; line-height: 1.35; }
 .trend-note svg { vertical-align: -2px; }
+
+/* proxies */
+.proxy-field { display: flex; flex-direction: column; gap: 6px; }
+.proxy-field .row > .input { flex: 1; min-width: 0; }
+.proxy-res { display: flex; align-items: center; gap: 7px; font-size: 12.5px; padding: 7px 10px; border-radius: 9px; }
+.proxy-res.ok { background: rgba(46,229,157,.08); border: 1px solid rgba(46,229,157,.3); color: #bff5dc; }
+.proxy-res.bad { background: rgba(255,90,110,.08); border: 1px solid rgba(255,90,110,.3); color: #ffb3bd; }
+.check-row { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13.5px; margin-bottom: 6px; }
+.check-row input { accent-color: #8b7bff; width: 16px; height: 16px; }
+.acc-name small.px { color: #9fd8ff; }
+.acc-name small.px.dup { color: #ffd27a; }
+.acc-count { margin-left: 6px; font-size: 11px; padding: 1px 7px; border-radius: 99px; background: rgba(255,255,255,.08); color: var(--muted); }
+.lib-sel-bar { display: flex; align-items: center; gap: 8px; }
+.post-mode { display: flex; gap: 8px; margin-bottom: 12px; }
+.post-mode button { flex: 1; text-align: left; padding: 10px 12px; border-radius: 11px; background: var(--glass); border: 1px solid var(--line); color: inherit; cursor: pointer; }
+.post-mode button b { display: block; font-size: 13.5px; }
+.post-mode button small { color: var(--muted); font-size: 11.5px; }
+.post-mode button.on { border-color: rgba(139,123,255,.7); background: rgba(139,123,255,.12); }

@@ -609,22 +609,52 @@ def _make_handler(app: App):
         return save_meta(a["plan_file"], a.get("title", ""), a.get("body", ""), a.get("tags") or [],
                          a.get("hashtags"))
 
-    def library_delete(a):
-        from .pipeline import PLAN_SUFFIX
-        pf = Path(a["plan_file"])
+    def _delete_short(pf: Path) -> bool:
+        """Delete a finished Short and its waiting uploads. False if it is being posted right now."""
+        from . import uploadqueue
         if not _is_allowed(pf):
             raise ApiError("Not allowed.", 403)
+        if uploadqueue.drop_plan(str(pf)):
+            return False
         try:
             d = json.loads(pf.read_text(encoding="utf-8"))
             out = Path(d["output"])
             for f in (out, out.with_suffix(".jpg"), out.with_suffix(".txt"), pf):
-                f.unlink(missing_ok=True)
+                for _ in range(3):
+                    try:
+                        f.unlink(missing_ok=True)
+                        break
+                    except PermissionError:   # a preview may still hold the file for a moment
+                        time.sleep(0.4)
         except FileNotFoundError:
             pass
         return True
 
+    def library_delete(a):
+        ok = _delete_short(Path(a["plan_file"]))
+        E.bus.emit("queue", {})
+        if not ok:
+            raise ApiError("This Short is being posted right now. Delete it when the upload finishes.")
+        return True
+
+    def library_delete_many(a):
+        done, busy, failed = 0, 0, 0
+        for pf in a.get("plan_files") or []:
+            try:
+                if _delete_short(Path(str(pf))):
+                    done += 1
+                else:
+                    busy += 1
+            except ApiError:
+                raise
+            except Exception:
+                failed += 1
+        E.bus.emit("queue", {})
+        return {"deleted": done, "posting": busy, "failed": failed}
+
     def library_upload(a):
-        return E.upload_now(a["plan_file"], a.get("platforms"))
+        return E.upload_now(a["plan_file"], a.get("platforms"),
+                            None if a.get("direct") is None else bool(a.get("direct")))
 
     def open_any(a):
         p = str(a.get("path", ""))
@@ -703,8 +733,41 @@ def _make_handler(app: App):
         acc = next((x for x in publish.load_accounts().get(a["platform"], []) if x.get("id") == a["id"]), None)
         if not acc:
             raise ApiError("Account not found.")
-        webupload.open_page(a["platform"], webupload.profile_dir(acc))
+        webupload.open_page(a["platform"], webupload.profile_dir(acc), acc.get("proxy", ""))
         return True
+
+    def _acc(a):
+        from . import publish
+        acc = next((x for x in publish.load_accounts().get(str(a["platform"]), []) if x.get("id") == a["id"]), None)
+        if not acc:
+            raise ApiError("Account not found.")
+        return acc
+
+    def account_proxy(a):
+        from . import proxy as px, webupload
+        acc = _acc(a)
+        if acc.get("mode") != "browser":
+            raise ApiError("Proxies work with direct sign-in accounts (Add account), not developer-key accounts.")
+        text = px.normalize(str(a.get("proxy") or ""))       # ProxyError (ValueError) -> friendly 400
+        webupload.register(str(a["platform"]), acc.get("profile", ""), acc.get("name", ""), text)
+        E.bus.emit("accounts", {})
+        return {"proxy": px.display(text)}
+
+    def account_proxy_test(a):
+        from . import proxy as px
+        text = str(a.get("proxy") or "").strip()
+        if not text and a.get("id"):
+            text = _acc(a).get("proxy", "")
+        if not text:
+            raise ApiError("Enter a proxy first.")
+        px.parse(text)
+        return px.check(text)
+
+    def signin_proxy(a):
+        try:
+            return E.signin_proxy(str(a["id"]), str(a.get("proxy") or ""))
+        except KeyError:
+            raise ApiError("That sign-in was closed. Start again.")
 
     # ---- upload queue
     def queue_get(_a):
@@ -713,15 +776,32 @@ def _make_handler(app: App):
 
     def queue_action(a):
         from . import uploadqueue
-        jid, act = str(a["id"]), str(a["action"])
+        jid, act = str(a.get("id") or ""), str(a["action"])
         if act == "now":
-            uploadqueue.set_status(jid, due=time.time(), status="waiting", error="")
+            uploadqueue.set_status(jid, due=time.time(), status="waiting", error="", waits=0)
         elif act == "retry":
-            uploadqueue.set_status(jid, due=time.time(), status="waiting", attempts=0, error="")
+            uploadqueue.set_status(jid, due=time.time(), status="waiting", attempts=0, waits=0, error="")
         elif act == "remove":
+            try:
+                E.stop_upload(jid)        # removing a job that is posting also closes its browser
+            except Exception:
+                pass
             uploadqueue.remove(jid)
+        elif act == "stop":
+            if not E.stop_upload(jid):
+                raise ApiError("That upload isn't running any more.")
         elif act == "when":
             uploadqueue.set_status(jid, due=float(a["due"]))
+        elif act == "later":
+            uploadqueue.set_status(jid, due=time.time() + float(a.get("minutes", 60)) * 60, status="waiting")
+        elif act == "retry_failed":
+            uploadqueue.retry_failed()
+        elif act == "post_all":
+            uploadqueue.post_all_now()
+        elif act == "clear_failed":
+            uploadqueue.clear_failed()
+        else:
+            raise ApiError(f"Unknown queue action: {act}")
         E.kick_uploads()
         return uploadqueue.load()
 
@@ -893,6 +973,8 @@ def _make_handler(app: App):
         set_ffmpeg_override(s.ffmpeg_path)
         E.bus.emit("settings", asdict(s))
         E.bus.emit("status", E.status())
+        if any(k.startswith("upload_") for k in (patch or {})):
+            E.kick_uploads()              # e.g. queue resumed or more parallel uploads allowed
         return asdict(s)
 
     def settings_set(a):
@@ -984,6 +1066,7 @@ def _make_handler(app: App):
         ("GET", "/api/library"): library,
         ("POST", "/api/library/meta"): library_meta,
         ("POST", "/api/library/delete"): library_delete,
+        ("POST", "/api/library/delete_many"): library_delete_many,
         ("POST", "/api/library/upload"): library_upload,
         ("POST", "/api/open"): open_any,
         ("GET", "/api/accounts"): accounts,
@@ -997,6 +1080,9 @@ def _make_handler(app: App):
         ("POST", "/api/accounts/enable"): account_enable,
         ("POST", "/api/accounts/remove"): account_remove,
         ("POST", "/api/accounts/open"): account_open,
+        ("POST", "/api/accounts/proxy"): account_proxy,
+        ("POST", "/api/accounts/proxy/test"): account_proxy_test,
+        ("POST", "/api/signin/proxy"): signin_proxy,
         ("GET", "/api/queue"): queue_get,
         ("POST", "/api/queue/action"): queue_action,
         ("POST", "/api/queue/clear"): queue_clear,
