@@ -121,7 +121,7 @@ def meta_for(plan_file: str) -> dict:
     data = json.loads(Path(plan_file).read_text(encoding="utf-8"))
     m = data.get("meta") or {}
     return {"title": m.get("title", ""), "description": m.get("description", ""), "tags": m.get("tags") or [],
-            "hashtags": m.get("hashtags") or ["#shorts"]}
+            "hashtags": m.get("hashtags") or ["#shorts"], "cover": data.get("cover") or ""}
 
 
 def _lane(j: dict, cache: dict) -> str:

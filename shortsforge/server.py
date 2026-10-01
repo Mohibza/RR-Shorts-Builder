@@ -106,7 +106,8 @@ def pick_files(kind: str = "video", multi: bool = False) -> list[str]:
             pass
     filters = {"video": "Videos|*.mp4;*.mkv;*.mov;*.webm;*.avi;*.m4v;*.flv;*.wmv|All files|*.*",
                "music": "Audio|*.mp3;*.m4a;*.wav;*.ogg;*.aac;*.flac|All files|*.*",
-               "cookies": "Cookies|*.txt|All files|*.*", "exe": "Programs|*.exe|All files|*.*"}.get(kind, "All files|*.*")
+               "cookies": "Cookies|*.txt|All files|*.*", "exe": "Programs|*.exe|All files|*.*",
+               "image": "Images|*.png;*.jpg;*.jpeg;*.webp|All files|*.*"}.get(kind, "All files|*.*")
     if os.name == "nt":
         if kind == "folder":
             ps = ("Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.FolderBrowserDialog;"
@@ -600,7 +601,9 @@ def _make_handler(app: App):
                         "meta": d.get("meta") or {}, "source": d.get("source", ""),
                         "source_title": d.get("source_title", ""), "created": d.get("created", 0),
                         "duration": (d.get("prep") or {}).get("D", 0), "project_ref": d.get("project_ref"),
-                        "style": d.get("style") or {}, "hook_text": d.get("hook_text", "")})
+                        "style": d.get("style") or {}, "hook_text": d.get("hook_text", ""),
+                        "cover": d.get("cover") if d.get("cover") and Path(d["cover"]).exists() else "",
+                        "cover_info": d.get("cover_info") or {}})
         out.sort(key=lambda d: d["created"], reverse=True)
         return out
 
@@ -619,7 +622,7 @@ def _make_handler(app: App):
         try:
             d = json.loads(pf.read_text(encoding="utf-8"))
             out = Path(d["output"])
-            for f in (out, out.with_suffix(".jpg"), out.with_suffix(".txt"), pf):
+            for f in (out, out.with_suffix(".jpg"), out.with_suffix(".txt"), out.with_suffix(".cover.jpg"), pf):
                 for _ in range(3):
                     try:
                         f.unlink(missing_ok=True)
@@ -651,6 +654,101 @@ def _make_handler(app: App):
                 failed += 1
         E.bus.emit("queue", {})
         return {"deleted": done, "posting": busy, "failed": failed}
+
+    # ---- thumbnails (optional): prompt + reference -> AI image, or a clean frame + title
+    def _thumb_plan(a):
+        pf = Path(str(a["plan_file"]))
+        if not _is_allowed(pf) or not pf.is_file():
+            raise ApiError("That Short is no longer in the library.", 404)
+        return pf, json.loads(pf.read_text(encoding="utf-8"))
+
+    def thumb_info(_a):
+        from . import thumbnail
+        s = Settings.load()
+        return {"providers": thumbnail.providers(s), "aspects": list(thumbnail.SIZES)}
+
+    def thumb_ref(a):
+        from . import thumbnail
+        path = str(a.get("path") or "")
+        if not path:
+            got = pick_files("image", False)
+            if not got:
+                return {"path": ""}
+            path = got[0]
+        try:
+            return {"path": thumbnail.keep_reference(path)}
+        except thumbnail.ThumbError as e:
+            raise ApiError(str(e))
+
+    def thumb_make(a):
+        from . import thumbnail
+        from .renderer import _camera_at
+        pf, d = _thumb_plan(a)
+        s = Settings.load()
+        aspect = str(a.get("aspect") or "9:16")
+        if aspect not in thumbnail.SIZES:
+            aspect = "9:16"
+        mode = str(a.get("mode") or "ai")
+        title = str(a.get("title") if a.get("title") is not None else (d.get("hook_text") or d.get("meta", {}).get("title", "")))
+        prompt = str(a.get("prompt") or "")[:2000]
+        ref = str(a.get("ref") or "")
+        if ref and not (_is_allowed(Path(ref)) and Path(ref).is_file()):
+            ref = ""
+        out = Path(d["output"])
+        work = data_dir() / "work" / "thumbs"
+        work.mkdir(parents=True, exist_ok=True)
+        # a clean frame of the Short (no captions): from the source when it's still cached, else from the export
+        frame = ""
+        if mode == "frame" or a.get("use_frame", True):
+            prep = d.get("prep") or {}
+            D = float(prep.get("D") or 10)
+            pos = min(max(0.0, float(a.get("at") if a.get("at") is not None else 0.3)), 0.98)
+            fpath = str(work / (out.stem[:40].replace(" ", "_") + "_frame.jpg"))
+            try:
+                src, info = d.get("src_file") or "", d.get("info") or {}
+                if src and Path(src).exists():
+                    from .renderer import RenderJob, source_time
+                    cl = d["clip"]
+                    job = RenderJob(src=src, start=cl["start"], end=cl["end"], out_path="", src_w=info.get("width", 0),
+                                    src_h=info.get("height", 0), ass_file="", parts=prep.get("pieces") or [])
+                    tp = pos * job.cut_duration
+                    cam = prep.get("camera") or []
+                    cx = _camera_at([tuple(c) for c in cam], tp) if cam and prep.get("layout") == "smart_crop" else None
+                    frame = thumbnail.clean_frame(src, source_time(job, tp) - float(d.get("src_offset") or 0.0), fpath,
+                                                  aspect, cx, (info.get("width", 0), info.get("height", 0)))
+                else:
+                    frame = thumbnail.clean_frame(str(out), pos * D, fpath, aspect)
+            except Exception as e:
+                if mode == "frame":
+                    raise ApiError(f"Couldn't grab a frame from the video: {str(e).splitlines()[0][:160]}")
+                frame = ""
+        dst = str(out.with_suffix(".cover.jpg"))
+        try:
+            if mode == "frame":
+                res = thumbnail.generate_frame(title, aspect, frame, dst)
+            else:
+                res = thumbnail.generate_ai(s, prompt, title, aspect, ref, frame, dst,
+                                            str(a.get("provider") or "auto"), E.bus.log)
+        except thumbnail.ThumbError as e:
+            raise ApiError(str(e))
+        d2 = json.loads(pf.read_text(encoding="utf-8"))
+        d2["cover"] = res["path"]
+        d2["cover_info"] = {"mode": mode, "prompt": prompt, "ref": ref, "aspect": aspect, "title": title,
+                            "provider": res["provider"], "use_frame": bool(a.get("use_frame", True)),
+                            "time": time.time()}
+        pf.write_text(json.dumps(d2, ensure_ascii=False, indent=1), encoding="utf-8")
+        E.bus.emit("library", {})
+        return {"cover": res["path"], "provider": res["provider"], "cover_info": d2["cover_info"]}
+
+    def thumb_remove(a):
+        pf, d = _thumb_plan(a)
+        c = d.pop("cover", "")
+        d.pop("cover_info", None)
+        if c:
+            Path(c).unlink(missing_ok=True)
+        pf.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+        E.bus.emit("library", {})
+        return True
 
     def library_upload(a):
         return E.upload_now(a["plan_file"], a.get("platforms"),
@@ -1068,6 +1166,10 @@ def _make_handler(app: App):
         ("POST", "/api/library/delete"): library_delete,
         ("POST", "/api/library/delete_many"): library_delete_many,
         ("POST", "/api/library/upload"): library_upload,
+        ("GET", "/api/thumb/info"): thumb_info,
+        ("POST", "/api/thumb/ref"): thumb_ref,
+        ("POST", "/api/thumb/make"): thumb_make,
+        ("POST", "/api/thumb/remove"): thumb_remove,
         ("POST", "/api/open"): open_any,
         ("GET", "/api/accounts"): accounts,
         ("POST", "/api/signin/start"): signin_start,

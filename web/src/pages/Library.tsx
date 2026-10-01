@@ -3,7 +3,7 @@ import { api, get, mediaUrl } from "../lib/api";
 import { go, setState, toast, useStore } from "../lib/store";
 import type { LibItem } from "../lib/types";
 import { Icon } from "../components/Icon";
-import { Btn, Empty, Field, IconBtn, Modal, Tags, Text, timeAgo } from "../components/ui";
+import { Btn, Empty, Field, IconBtn, Modal, Select, Tags, Text, Toggle, timeAgo } from "../components/ui";
 import { fmt } from "../lib/timeline";
 
 export const PLAT_ICON: Record<string, string> = { youtube: "youtube", tiktok: "tiktok", facebook: "facebook", instagram: "instagram" };
@@ -56,6 +56,7 @@ export function LibraryPage() {
               <div className="lib-thumb" onClick={() => setOpen(it)}>
                 {it.thumb ? <img src={mediaUrl(it.thumb, it.created)} alt="" loading="lazy" /> : <Icon name="film" />}
                 <span className="dur">{fmt(it.duration)}</span>
+                {it.cover && <span className="cover-badge" title="Has a custom thumbnail"><Icon name="image" size={12} /></span>}
                 <button className={`lib-check ${sel.has(it.plan_file) ? "on" : ""}`} onClick={(e) => { e.stopPropagation(); const n = new Set(sel); n.has(it.plan_file) ? n.delete(it.plan_file) : n.add(it.plan_file); setSel(n); }}><Icon name="check" size={13} /></button>
                 <div className="hover-hint"><Icon name="play" size={22} /></div>
               </div>
@@ -109,9 +110,83 @@ function ShortModal({ it, onClose, onChanged, onPost }: { it: LibItem; onClose: 
           <Field label="Hashtags"><Tags value={hash} onChange={(v) => setHash(v.map((t) => (t.startsWith("#") ? t : "#" + t)))} /></Field>
           <Field label="Tags"><Tags value={tags} onChange={setTags} /></Field>
           {it.meta.credit && <p className="muted small">Music credit added automatically: {it.meta.credit}</p>}
+          <ThumbMaker it={it} title={title} onChanged={onChanged} />
         </div>
       </div>
     </Modal>
+  );
+}
+
+// ------------------------------------------------------------------ optional thumbnail: prompt + reference -> AI
+const ASPECTS: [string, string][] = [["9:16", "9:16 · Shorts / TikTok / Reels cover"], ["16:9", "16:9 · YouTube thumbnail"], ["4:5", "4:5 · Instagram"], ["1:1", "1:1 · Square"]];
+
+function ThumbMaker({ it, title, onChanged }: { it: LibItem; title: string; onChanged: () => void }) {
+  const ci = it.cover_info || {};
+  const [open, setOpen] = useState(!!it.cover);
+  const [cover, setCover] = useState(it.cover || "");
+  const [ver, setVer] = useState(ci.time || 0);
+  const [prompt, setPrompt] = useState(ci.prompt || "");
+  const [ref, setRef] = useState(ci.ref || "");
+  const [head, setHead] = useState(ci.title ?? (it.hook_text || title || ""));
+  const [aspect, setAspect] = useState(ci.aspect || "9:16");
+  const [useFrame, setUseFrame] = useState(ci.use_frame !== false);
+  const [busy, setBusy] = useState<"" | "ai" | "frame">("");
+  const [provs, setProvs] = useState<string[] | null>(null);
+  useEffect(() => { if (open && provs === null) get<{ providers: string[] }>("/api/thumb/info").then((r) => setProvs(r.providers)).catch(() => setProvs([])); }, [open]);
+  const make = async (mode: "ai" | "frame") => {
+    setBusy(mode);
+    try {
+      const r = await api<{ cover: string; provider: string; cover_info: { time: number } }>("/api/thumb/make",
+        { plan_file: it.plan_file, mode, prompt, ref, title: head, aspect, use_frame: useFrame });
+      setCover(r.cover); setVer(r.cover_info.time);
+      toast(mode === "ai" ? `Thumbnail made with ${r.provider === "gemini" ? "Gemini" : "OpenAI"}` : "Thumbnail made from the video frame", "ok");
+      onChanged();
+    } catch (e: any) { toast(e.message, "error"); }
+    setBusy("");
+  };
+  const pickRef = async () => {
+    try { const r = await api<{ path: string }>("/api/thumb/ref", {}); if (r.path) setRef(r.path); }
+    catch (e: any) { toast(e.message, "error"); }
+  };
+  const remove = async () => {
+    try { await api("/api/thumb/remove", { plan_file: it.plan_file }); setCover(""); onChanged(); }
+    catch (e: any) { toast(e.message, "error"); }
+  };
+  const noKey = provs !== null && provs.length === 0;
+  if (!open) return (
+    <button className="thumb-open" onClick={() => setOpen(true)}><Icon name="image" size={15} /> Add a thumbnail <span className="muted">(optional)</span></button>
+  );
+  return (
+    <div className="thumb-maker">
+      <div className="sec-head"><h3><Icon name="image" size={15} /> Thumbnail <span className="muted small">optional</span></h3>
+        {!cover && <button className="linkbtn small" onClick={() => setOpen(false)}>Hide</button>}</div>
+      <div className="thumb-row">
+        <div className={`thumb-prev a-${aspect.replace(":", "x")}`}>
+          {busy ? <div className="thumb-busy"><span className="spin" /><small>{busy === "ai" ? "The AI is drawing… (10–60 s)" : "Making…"}</small></div>
+            : cover ? <img src={mediaUrl(cover, ver)} alt="Thumbnail" /> : <div className="thumb-empty"><Icon name="image" size={22} /><small>No thumbnail yet</small></div>}
+        </div>
+        <div className="thumb-form">
+          <Field label="Describe the thumbnail"><textarea className="input" rows={3} value={prompt} placeholder="e.g. dramatic close-up, shocked face, dark background, big yellow text, red arrow pointing at the phone" onChange={(e) => setPrompt(e.target.value)} /></Field>
+          <Field label="Reference to copy the style from" hint="The AI replicates this image's layout, colours and text style, with your Short's person and your headline. Logos and people in the reference are not copied.">
+            <div className="row gap">
+              {ref ? <div className="ref-chip"><img src={mediaUrl(ref)} alt="" /><span>Reference added</span><button className="x" title="Remove reference" onClick={() => setRef("")}><Icon name="x" size={12} /></button></div>
+                : <Btn small icon="plus" onClick={pickRef}>Add reference image</Btn>}
+            </div></Field>
+          <Field label="Headline on the thumbnail"><Text value={head} onChange={setHead} placeholder="Empty = no text" /></Field>
+          <div className="two">
+            <Field label="Size"><Select value={aspect} options={ASPECTS} onChange={(v) => setAspect(v)} /></Field>
+            <Toggle on={useFrame} onChange={setUseFrame} label="Use the person from my Short" hint="Sends a clean frame of this Short so the thumbnail shows your real speaker" />
+          </div>
+        </div>
+      </div>
+      {noKey && <p className="muted small">AI thumbnails need a Gemini or OpenAI key (Settings → AI). Without a key, “From video frame” still works.</p>}
+      <div className="row gap wrap">
+        <Btn kind="primary" icon="spark" busy={busy === "ai"} disabled={!!busy || noKey || (!prompt.trim() && !ref)} onClick={() => make("ai")}>{cover ? "Generate again" : "Generate with AI"}</Btn>
+        <Btn icon="frame" busy={busy === "frame"} disabled={!!busy} onClick={() => make("frame")}>From video frame</Btn>
+        {cover && <Btn kind="ghost" icon="folder" onClick={() => api("/api/open", { path: cover, select: true })}>Show file</Btn>}
+        {cover && <Btn kind="ghost" icon="trash" disabled={!!busy} onClick={remove}>Remove</Btn>}
+      </div>
+    </div>
   );
 }
 

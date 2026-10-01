@@ -100,6 +100,8 @@ export type LibItem = {
   duration: number; project_ref?: { project: string; clip: string } | null; hook_text: string;
   meta: { title?: string; body?: string; description?: string; tags?: string[]; hashtags?: string[]; credit?: string };
   style: Partial<Style>;
+  cover?: string;
+  cover_info?: { mode?: string; prompt?: string; ref?: string; aspect?: string; title?: string; provider?: string; use_frame?: boolean; time?: number };
 };
 
 export type Settings = Record<string, any>;

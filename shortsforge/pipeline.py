@@ -1078,6 +1078,18 @@ class Pipeline:
                      + f" · {len(sp['streaks'])} streak(s)" + (" · film texture" if sp.get("texture") else ""))
         out_path = out_dir / f"{stem}.mp4"
         # clean up an older render of the same slot (title may differ after re-style)
+        keep_cover: dict = {}      # an optional thumbnail made for this Short survives a re-render / new title
+        for cand in [out_path] + list(out_dir.glob(f"{index + 1:02d} - *.mp4")):
+            try:
+                od = json.loads(Path(str(cand)[:-4] + PLAN_SUFFIX).read_text(encoding="utf-8"))
+                if od.get("cover") and Path(od["cover"]).exists():
+                    new_cover = out_path.with_suffix(".cover.jpg")
+                    if Path(od["cover"]) != new_cover:
+                        shutil.move(od["cover"], new_cover)
+                    keep_cover = {"cover": str(new_cover), "cover_info": od.get("cover_info") or {}}
+                    break
+            except Exception:
+                continue
         for old in out_dir.glob(f"{index + 1:02d} - *.mp4"):
             if old != out_path:
                 try:
@@ -1144,7 +1156,7 @@ class Pipeline:
             "style": asdict(choice), "resolved_layout": layout, "hook_text": plan.hook_text,
             "language": lang, "words_abs": words_abs, "meta": meta, "output": str(out_path), "thumb": thumb,
             "created": time.time(), "prep": prep, "music": music, "music_offset": music_offset,
-            "project_ref": extra.get("project_ref"), "creative": cr.to_json(), "story": sp,
+            "project_ref": extra.get("project_ref"), "creative": cr.to_json(), "story": sp, **keep_cover,
         }, ensure_ascii=False, indent=1), encoding="utf-8")
         return ShortResult(str(out_path), thumb, plan.hook_text or meta["title"], clip.start, clip.end, clip.score,
                            choice.label(), plan_file, meta)

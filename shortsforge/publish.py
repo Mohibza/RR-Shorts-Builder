@@ -358,8 +358,16 @@ def youtube_upload(acc: dict, video: str, meta: dict, s, progress: Progress = la
                 out = json.loads(resp.read().decode("utf-8"))
                 progress(1.0)
                 vid = out.get("id", "")
-                return {"id": vid, "url": f"https://youtube.com/shorts/{vid}",
-                        "note": out.get("status", {}).get("privacyStatus", "")}
+                note = out.get("status", {}).get("privacyStatus", "")
+                cover = meta.get("cover") or ""
+                if vid and cover and Path(cover).is_file() and Path(cover).stat().st_size <= 2 * 1024 * 1024:
+                    # optional custom thumbnail; YouTube only accepts it for some channels/videos, so never fail on it
+                    tr = _req("POST", "https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId=" + vid,
+                              data=Path(cover).read_bytes(), raw=True, timeout=120,
+                              headers={"Authorization": f"Bearer {token}", "Content-Type": "image/jpeg"})
+                    ok_t = not isinstance(tr, urllib.error.HTTPError)
+                    note += " + thumbnail" if ok_t else " (thumbnail not accepted by YouTube)"
+                return {"id": vid, "url": f"https://youtube.com/shorts/{vid}", "note": note}
             if code == 308:
                 rng = resp.headers.get("Range")
                 sent = int(rng.split("-")[1]) + 1 if rng else 0
