@@ -1,8 +1,8 @@
 """Build and run the FFmpeg graph that turns a time range into a finished vertical Short."""
 from __future__ import annotations
 
+import copy
 import re
-
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,17 +56,120 @@ class RenderJob:
     frame_zoom: float = 1.0
     # fast mode: `src` is a downloaded section that starts at this absolute source time
     src_offset: float = 0.0
+    # Story FX (see story.py): freezes [{t (cut timeline), d}], and the final-timeline plan
+    # {spans, streaks, leaks, texture}; story_ass = editorial title + beat text; mask_* = speaker cut-out frames
+    # for the title window (PNG sequence at the output fps), so the title can sit behind the speaker
+    freezes: list = field(default_factory=list)
+    story: dict = field(default_factory=dict)
+    story_ass: str = ""
+    mask_pattern: str = ""
+    mask_n: int = 0
+    title_win: tuple = ()
 
     def pieces(self) -> list:
         return [tuple(p) for p in self.parts] if self.parts else [(self.start, self.end, self.keep)]
 
     @property
-    def duration(self) -> float:
-        """Length of the finished Short (after jump cuts and stitching)."""
+    def cut_duration(self) -> float:
+        """Length after jump cuts and stitching, before Story FX freezes."""
         total = 0.0
         for a, b, keep in self.pieces():
             total += sum(y - x for x, y in keep) if keep else (b - a)
         return max(0.1, total)
+
+    @property
+    def duration(self) -> float:
+        """Length of the finished Short (after jump cuts, stitching and freezes)."""
+        return self.cut_duration + sum(self._frozen())
+
+    def _frozen(self) -> list:
+        return [max(1, round(float(f["d"]) * self.fps)) / self.fps for f in self.freezes or []]
+
+
+def _en(windows: list) -> str:
+    return "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in windows)
+
+
+def freeze_video(job: "RenderJob") -> str:
+    """loop filters that hold one frame at each freeze (the rest of the Short moves later)."""
+    out, added = [], 0
+    for f in sorted(job.freezes or [], key=lambda x: x["t"]):
+        n = max(1, round(float(f["d"]) * job.fps))
+        start = int(round(float(f["t"]) * job.fps)) + added
+        out.append(f"loop=loop={n}:size=1:start={start}")
+        added += n
+    return (",".join(out) + ",setpts=N/FRAME_RATE/TB") if out else ""
+
+
+def post_fx(job: "RenderJob", g: list, cur: str) -> str:
+    """Story FX on the framed picture: freeze look, streak blur, film texture. Returns the new label."""
+    st = job.story or {}
+    spans = [tuple(x) for x in st.get("spans") or []]
+    chain = []
+    if spans:
+        en = _en(spans)
+        flash = _en([(b, b + 0.05) for _a, b in spans])
+        chain += [f"eq=saturation=0.38:brightness=-0.045:contrast=1.06:enable='{en}'",
+                  f"vignette=angle=PI/3.2:enable='{en}'", f"eq=brightness=0.3:enable='{flash}'"]
+    streaks = st.get("streaks") or []
+    if streaks:
+        inner = _en([(t - 0.05, t + 0.07) for t in streaks])
+        outer = _en([(t - 0.13, t + 0.16) for t in streaks])
+        chain += [f"avgblur=sizeX=22:sizeY=1:enable='{outer}'", f"avgblur=sizeX=56:sizeY=1:enable='{inner}'"]
+    if chain:
+        g.append(f"[{cur}]{','.join(chain)}[sfx1]")
+        cur = "sfx1"
+    tex = st.get("texture") or None
+    if tex:
+        D = job.duration
+        bloom = float(tex.get("bloom") or 0)
+        if bloom > 0.01:
+            g.append(f"[{cur}]format=yuv420p,split=2[blA][blB]")
+            g.append(f"[blB]scale=270:480:flags=bilinear,gblur=sigma=9,scale={W}:{H}:flags=bicubic[blG]")
+            g.append(f"[blA][blG]blend=c0_mode=screen:c0_opacity={bloom:.3f}:c1_mode=normal:c1_opacity=1:"
+                     f"c2_mode=normal:c2_opacity=1[blm]")
+            cur = "blm"
+        leaks = st.get("leaks") or []
+        if tex.get("leak") and leaks:
+            # a short warm light leak after the opening and after each beat: rendered only for its 2.4 s window
+            # (tiny frame, scaled up) and laid over the picture there, so it costs almost nothing
+            for i, L in enumerate(leaks[:4]):
+                a = ("255*0.5*exp(-pow((T-0.8)/0.7,2))*exp(-(pow(X-W*(0.8-0.1*sin((T+" + f"{L:.2f}" + ")*0.9)),2)"
+                     "/(2*pow(W*0.42,2))+pow(Y-H*0.17,2)/(2*pow(H*0.3,2))))")
+                g.append(f"color=c=black:s=108x192:r={job.fps}:d=2.4,format=rgba,"
+                         f"geq=r='255':g='150':b='72':a='{a}',scale={W}:{H}:flags=bilinear,"
+                         f"setpts=PTS+{max(0.0, L):.3f}/TB[lk{i}]")
+                g.append(f"[{cur}][lk{i}]overlay=0:0:format=yuv420:eof_action=pass[lkd{i}]")
+                cur = f"lkd{i}"
+        last = []
+        grain = float(tex.get("grain") or 0)
+        if grain > 0.01:
+            last.append(f"noise=c0s={int(round(2 + 4 * grain))}:c0f=t+u")   # fine film grain (cheap to encode)
+        if tex.get("vignette") and "vignette" not in (COLOR_GRADES.get(job.grade, {}).get("vf") or ""):
+            last.append("vignette=angle=PI/4.8")
+        if last:
+            g.append(f"[{cur}]{','.join(last)}[tx]")
+            cur = "tx"
+    return cur
+
+
+def title_layer(job: "RenderJob", g: list, cur: str, fontsdir: str, mask_input: Optional[int]) -> str:
+    """The editorial title + beat text. With a speaker cut-out the title sits behind the speaker and the
+    background softens a touch (portrait look) while the title is up."""
+    if not job.story_ass:
+        return cur
+    af = f"ass=filename={filter_path(job.story_ass)}:fontsdir={filter_path(fontsdir)}"
+    if mask_input is None or not job.mask_n or not job.title_win:
+        g.append(f"[{cur}]{af}[ttl]")
+        return "ttl"
+    t0, t1 = job.title_win
+    g.append(f"[{cur}]split=2[tlA][tlB]")
+    g.append(f"[tlB]trim=end_frame={job.mask_n},setpts=PTS-STARTPTS[tlF]")
+    g.append(f"[{mask_input}:v]format=gray,scale={W}:{H}:flags=bicubic,setpts=PTS-STARTPTS[tlM]")
+    g.append("[tlF][tlM]alphamerge[tlP]")
+    g.append(f"[tlA]gblur=sigma=3.5:enable='between(t,{t0:.3f},{t1:.3f})',{af}[tlT]")
+    g.append("[tlT][tlP]overlay=0:0:eof_action=pass:format=auto[ttl]")
+    return "ttl"
 
 
 def _even(v: float) -> int:
@@ -235,15 +338,10 @@ def layout_graph(job: RenderJob) -> list[str]:
     ]
 
 
-def build_args(job: RenderJob, fontsdir: str) -> list[str]:
-    D = job.duration                 # finished length
-    # ffmpeg runs from the data folder, so every file argument must be absolute
+def _inputs_and_core(job: RenderJob, with_audio: bool = True) -> tuple[list, list, str]:
+    """Inputs + the picture up to (and including) Story FX looks. Returns (args, graph, label)."""
+    D = job.duration
     job.src = str(Path(job.src).resolve())
-    job.out_path = str(Path(job.out_path).resolve())
-    if job.music:
-        job.music = str(Path(job.music).resolve())
-
-    # one input per piece (fast seeking even when pieces are far apart), then stitch them in order
     pieces = job.pieces()
     args: list[str] = []
     g: list[str] = []
@@ -252,28 +350,45 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
         v = f"[{i}:v]fps={job.fps},setsar=1"
         v += f",select='{select_expr(keep)}',setpts=N/FRAME_RATE/TB" if keep else ",setpts=PTS-STARTPTS"
         g.append(v + f"[pv{i}]")
-        if job.has_audio:
+        if job.has_audio and with_audio:
             au = f"[{i}:a]"
             au += f"aselect='{select_expr(keep)}',asetpts=N/SR/TB," if keep else "asetpts=PTS-STARTPTS,"
             g.append(au + f"aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[pa{i}]")
     k = len(pieces)
+    au_on = job.has_audio and with_audio
+    fz = freeze_video(job)
+    vlabel = "vsrc0" if fz else "vsrc"
     if k == 1:
-        g.append("[pv0]null[vsrc]")
-        if job.has_audio:
-            g.append("[pa0]anull[asrc]")
+        g.append(f"[pv0]null[{vlabel}]")
+        if au_on:
+            g.append("[pa0]anull[asrc0]")
     else:
-        ins = "".join(f"[pv{i}]" + (f"[pa{i}]" if job.has_audio else "") for i in range(k))
-        g.append(f"{ins}concat=n={k}:v=1:a={1 if job.has_audio else 0}[vsrc]" + ("[asrc]" if job.has_audio else ""))
-    music_idx = None
-    if job.music and (job.music_volume > 0 or job.music_auto) and Path(job.music).exists():
-        args += ["-stream_loop", "-1", "-ss", f"{max(0.0, job.music_offset):.2f}", "-i", job.music]
-        music_idx = k
-    # music level: Auto = loudness-normalise the track ~13 dB under the voice; manual = slider gain
-    mus_level = ("loudnorm=I=-27:TP=-4:LRA=9,aresample=48000" + (f",volume={job.music_volume / 0.12:.3f}"
-                                                                if abs(job.music_volume - 0.12) > 0.005 else "")
-                 if job.music_auto else f"volume={job.music_volume:.3f}")
+        ins = "".join(f"[pv{i}]" + (f"[pa{i}]" if au_on else "") for i in range(k))
+        g.append(f"{ins}concat=n={k}:v=1:a={1 if au_on else 0}[{vlabel}]" + ("[asrc0]" if au_on else ""))
+    if fz:
+        g.append(f"[vsrc0]{fz}[vsrc]")
+    if au_on:
+        fr = sorted(job.freezes or [], key=lambda x: x["t"])
+        if fr:
+            # the voice stops for each freeze (silence of the same length), then carries on
+            n = len(fr)
+            g.append(f"[asrc0]asplit={n + 1}" + "".join(f"[as{i}]" for i in range(n + 1)))
+            seq, prev = [], 0.0
+            for i, f in enumerate(fr):
+                t = float(f["t"])
+                g.append(f"[as{i}]atrim={prev:.4f}:{t:.4f},asetpts=PTS-STARTPTS[aseg{i}]")
+                d = max(1, round(float(f["d"]) * job.fps)) / job.fps
+                g.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{d:.4f},aformat=sample_fmts=fltp:sample_rates=48000:"
+                         f"channel_layouts=stereo[az{i}]")
+                seq += [f"[aseg{i}]", f"[az{i}]"]
+                prev = t
+            g.append(f"[as{n}]atrim=start={prev:.4f},asetpts=PTS-STARTPTS[aseg{n}]")
+            seq.append(f"[aseg{n}]")
+            g.append(f"{''.join(seq)}concat=n={len(seq)}:v=0:a=1[asrc]")
+        else:
+            g.append("[asrc0]anull[asrc]")
 
-    mo = motion_filters(job.motion, D, job.punch_times, job.intro, job.fps)
+    mo = motion_filters(job.motion, D, job.punch_times, job.intro, job.fps, story=job.story or None)
     grade = COLOR_GRADES.get(job.grade, COLOR_GRADES["none"])["vf"]
     gs = re.search(r"unsharp=5:5:([\d.]+):5:5:0\.0,?", grade)
     job._pre_motion, job._motion_done, job._sharp_used = mo, False, False
@@ -289,6 +404,47 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
     if mo and not job._motion_done:
         g.append(f"[{cur}]{mo}[moved]")
         cur = "moved"
+    cur = post_fx(job, g, cur)
+    return args, g, cur
+
+
+def mask_pass_args(job: RenderJob, out_pattern: str, frames: int, width: int = 270) -> list[str]:
+    """Render just the title window, small, exactly as framed in the export (for the speaker cut-out)."""
+    st = dict(job.story or {})
+    st["texture"] = None                      # grain/leaks would only confuse the cut-out
+    j = copy.copy(job)
+    j.story = st
+    args, g, cur = _inputs_and_core(j, with_audio=False)
+    h = _even(width * H / W)
+    g.append(f"[{cur}]trim=end_frame={frames},scale={width}:{h}:flags=bilinear,format=rgb24[mk]")
+    return args + ["-filter_complex", ";".join(g), "-map", "[mk]", "-an", "-frames:v", str(frames),
+                   "-start_number", "0", str(Path(out_pattern).resolve())]
+
+
+def build_args(job: RenderJob, fontsdir: str) -> list[str]:
+    D = job.duration                 # finished length
+    # ffmpeg runs from the data folder, so every file argument must be absolute
+    job.out_path = str(Path(job.out_path).resolve())
+    if job.music:
+        job.music = str(Path(job.music).resolve())
+    args, g, cur = _inputs_and_core(job)
+    k = len(job.pieces())
+    nin = k
+    music_idx = None
+    if job.music and (job.music_volume > 0 or job.music_auto) and Path(job.music).exists():
+        args += ["-stream_loop", "-1", "-ss", f"{max(0.0, job.music_offset):.2f}", "-i", job.music]
+        music_idx = nin
+        nin += 1
+    mask_idx = None
+    if job.mask_pattern and job.mask_n and job.story_ass:
+        args += ["-framerate", str(job.fps), "-start_number", "0", "-i", str(Path(job.mask_pattern).resolve())]
+        mask_idx = nin
+        nin += 1
+    # music level: Auto = loudness-normalise the track ~13 dB under the voice; manual = slider gain
+    mus_level = ("loudnorm=I=-27:TP=-4:LRA=9,aresample=48000" + (f",volume={job.music_volume / 0.12:.3f}"
+                                                                if abs(job.music_volume - 0.12) > 0.005 else "")
+                 if job.music_auto else f"volume={job.music_volume:.3f}")
+    cur = title_layer(job, g, cur, fontsdir, mask_idx)
     if job.progress_bar:
         acc = job.accent.lstrip("#")
         g.append(f"color=c=0x{acc}:s={W}x12:r={job.fps}:d={D:.3f}[pb]")
@@ -309,8 +465,12 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
     # Audio: voice (jump-cut, loudness-normalised) + optional ducked music + optional sound effects
     sfx_idx = None
     if job.sfx and Path(job.sfx).exists():
-        sfx_idx = k + (1 if music_idx is not None else 0)
+        sfx_idx = nin
+        nin += 1
         args += ["-i", str(Path(job.sfx).resolve())]
+    duck = ""
+    if (job.story or {}).get("spans"):       # the music drops for every freeze, then the hit lands
+        duck = f",volume=0.22:enable='{_en([tuple(x) for x in job.story['spans']])}'"
     main = None
     if job.has_audio:
         a = "[asrc]aresample=48000,aformat=channel_layouts=stereo"
@@ -321,7 +481,7 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
             g.append(a + ",asplit=2[voice][key]")
             g.append(f"[{music_idx}:a]aresample=48000,aformat=channel_layouts=stereo,{mus_level},"
                      f"atrim=0:{D:.3f},afade=t=in:d=1,afade=t=out:st={max(0, D - 1.5):.3f}:d=1.5[mus]")
-            g.append("[mus][key]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[duck]")
+            g.append(f"[mus][key]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400{duck}[duck]")
             g.append("[voice][duck]amix=inputs=2:duration=first:normalize=0[amain]")
         else:
             g.append(a + "[amain]")
@@ -330,7 +490,7 @@ def build_args(job: RenderJob, fontsdir: str) -> list[str]:
         g.append(f"[{music_idx}:a]aresample=48000,aformat=channel_layouts=stereo,"
                  f"{'loudnorm=I=-16:TP=-2,aresample=48000' if job.music_auto else f'volume={max(job.music_volume * 3, 0.3):.3f}'},"
                  f"atrim=0:{D:.3f},"
-                 f"afade=t=out:st={max(0, D - 1.5):.3f}:d=1.5[amain]")
+                 f"afade=t=out:st={max(0, D - 1.5):.3f}:d=1.5{duck}[amain]")
         main = "[amain]"
     amap = None
     if sfx_idx is not None:
@@ -407,16 +567,18 @@ def _camera_at(camera: list, t: float) -> Optional[float]:
 
 
 def preview_frame(job: RenderJob, t: float, out_png: str, width: int = 720) -> str:
-    """One finished frame of the Short at time `t` (layout, grade, captions, hook, watermark) in about a second.
-    Camera motion and intro effects are left out; the full render adds them."""
+    """One finished frame of the Short at time `t` (layout, grade, captions, hook, Story FX looks and titles)
+    in about a second. The intro flash is left out; the full render adds it."""
     import copy
+    from .story import to_pre
     j = copy.copy(job)
     D = j.duration
     t = min(max(0.0, t), max(0.0, D - 0.05))
+    pre, _fi = to_pre(t, [{"t": f["t"], "d": d} for f, d in zip(j.freezes or [], j._frozen())])
     src = str(Path(j.src).resolve())
     cx = _camera_at(j.camera, t)
     j.camera = [(0.0, cx)] if cx is not None else []
-    mo = motion_filters(j.motion, D, j.punch_times, j.intro, j.fps, at=t)
+    mo = motion_filters(j.motion, D, j.punch_times, j.intro, j.fps, at=t, story=j.story or None)
     grade = COLOR_GRADES.get(j.grade, COLOR_GRADES["none"])["vf"]
     gs = re.search(r"unsharp=5:5:([\d.]+):5:5:0\.0,?", grade)
     j._pre_motion, j._motion_done, j._sharp_used = mo, False, False
@@ -431,12 +593,20 @@ def preview_frame(job: RenderJob, t: float, out_png: str, width: int = 720) -> s
     if mo and not j._motion_done:
         g.append(f"[{cur}]{mo}[moved]")
         cur = "moved"
+    st = dict(j.story or {})
+    st["leaks"] = []                    # the light leak needs a moving clock; skip it in a still
+    j.story = st
+    cur = post_fx(j, g, cur)
+    fdir = str(fonts.fonts_dir())
+    if j.story_ass:
+        g.append(f"[{cur}]ass=filename={filter_path(j.story_ass)}:fontsdir={filter_path(fdir)}[ttl]")
+        cur = "ttl"
     if j.progress_bar and t > 0.05:
         g.append(f"[{cur}]drawbox=x=0:y=0:w={max(2, int(W * t / D))}:h=12:color=0x{j.accent.lstrip('#')}:t=fill[pbd]")
         cur = "pbd"
-    g.append(f"[{cur}]ass=filename={filter_path(j.ass_file)}:fontsdir={filter_path(str(fonts.fonts_dir()))},"
+    g.append(f"[{cur}]ass=filename={filter_path(j.ass_file)}:fontsdir={filter_path(fdir)},"
              f"scale={width}:-2:flags=bicubic[vout]")
     out_png = str(Path(out_png).resolve())
-    run_ffmpeg(["-ss", f"{max(0.0, source_time(j, t) - j.src_offset):.3f}", "-i", src, "-filter_complex", ";".join(g), "-map", "[vout]",
-                "-frames:v", "1", "-update", "1", out_png], 1.0, cwd=ffmpeg_cwd())
+    run_ffmpeg(["-ss", f"{max(0.0, source_time(j, pre) - j.src_offset):.3f}", "-i", src, "-filter_complex", ";".join(g),
+                "-map", "[vout]", "-frames:v", "1", "-update", "1", out_png], 1.0, cwd=ffmpeg_cwd())
     return out_png

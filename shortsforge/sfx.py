@@ -586,7 +586,7 @@ def resolve_level(level: str, words: list[dict], dur: float) -> str:
 def plan(level: str, dur: float, words: list[dict], chunk_starts: list[float], caption_style: dict,
          hook_anim: Optional[str], intro: str, motion: str, punch_times: list[float], has_cta: bool,
          emphasis: set, seams: Optional[list] = None, hook_end: float = 0.0, pack: str = "clean",
-         seed: int = 0) -> list[tuple[float, str, float]]:
+         seed: int = 0, story: Optional[list] = None) -> list[tuple[float, str, float]]:
     """Return [(time, sound, gain)] for one Short.
 
     `pack` picks the family of sounds (cinematic, hype, clean, funny, tech) and `seed` makes every Short choose
@@ -598,8 +598,10 @@ def plan(level: str, dur: float, words: list[dict], chunk_starts: list[float], c
     if level == "off":
         return []
     pick = Picker(pack, seed)
-    ev = _plan_core(level, dur, words, chunk_starts, caption_style, hook_anim, intro, punch_times, has_cta,
-                    emphasis, pick)
+    # Story FX first (riser into each beat, hit when it snaps back, whoosh on streaks): they win any clash
+    ev = [(max(0.0, t), pick(role), g) for t, role, g in (story or []) if t < dur - 0.1]
+    ev += _plan_core(level, dur, words, chunk_starts, caption_style, hook_anim, intro, punch_times, has_cta,
+                     emphasis, pick)
     ev += _plan_retention(level, dur, words, chunk_starts, seams or [], ev, hook_end, pick)
     return _dedupe(ev)
 

@@ -5,6 +5,7 @@ import json
 import os
 import random
 import re
+import shutil
 import threading
 import time
 import zlib
@@ -22,13 +23,14 @@ from . import sfx
 from .facetrack import camera_path, track_faces
 from .pacing import tighten
 from . import director, music_index, vibe as vibes
+from . import story as story_fx
 from .llm import AI
 from .romanize import romanize_text, romanize_transcript
 from .highlights import INTENSE, Clip, words_in_range
 from .renderer import RenderJob, preview_frame, render, thumbnail
 from . import metadata, music_sources
 from .transcriber import ModelDownloadError, energy_curve, extract_audio, transcribe
-from .utils import Cancelled, check_free_space, probe, safe_name, set_ffmpeg_override
+from .utils import Cancelled, check_free_space, ffmpeg_cwd, probe, safe_name, set_ffmpeg_override
 
 PLAN_SUFFIX = ".sf.json"
 WORK = CACHE_DIR / "work"
@@ -168,7 +170,8 @@ def creative_inputs(c: dict, edits: dict) -> dict:
             "reshuffle": int(audio.get("seed") or 0), "zooms_abs": edits.get("zooms"),
             "zoom_mult": edits.get("zoom_mult") or 1.0,
             "pack": audio.get("sfx_pack") if audio.get("sfx_pack") not in (None, "", "auto") else "",
-            "music_mood": audio.get("music_mood") if audio.get("music_mood") not in (None, "", "auto") else ""}
+            "music_mood": audio.get("music_mood") if audio.get("music_mood") not in (None, "", "auto") else "",
+            "story": edits.get("story") or {}}
 
 
 @dataclass
@@ -587,7 +590,8 @@ class Pipeline:
 
     # ------------------------------------------------------------------ vibe: music, sounds, zooms, opening
     def creative(self, s: Settings, cin: dict, words: list, D: float, pieces: list, choice: "StyleChoice",
-                 clip: Clip, index: int, emphasis: set, extra: dict, log: bool = True) -> tuple["Creative", "StyleChoice"]:
+                 clip: Clip, index: int, emphasis: set, extra: dict, log: bool = True,
+                 shift: Optional[Callable[[float], float]] = None) -> tuple["Creative", "StyleChoice"]:
         """Resolve the vibe-driven choices for one Short.
 
         cin (from the project clip + the user's edits): vibe (detected), vibe_override, seed, reshuffle,
@@ -601,7 +605,8 @@ class Pipeline:
         amt = vibes.zoom_amount(vibe) * float(getattr(s, "zoom_strength", 1.0) or 1.0) * float(cin.get("zoom_mult") or 1.0)
         zabs = cin.get("zooms_abs")
         if zabs is not None:
-            pts = sorted(t for t in (abs_to_play(pieces, float(z)) for z in zabs) if t is not None)
+            pts = sorted((shift or (lambda x: x))(t) for t in (abs_to_play(pieces, float(z)) for z in zabs)
+                         if t is not None)
             punches = [(t, round(amt * (1.0 if i % 2 == 0 else 0.75), 4)) for i, t in enumerate(pts)]
         elif choice.motion == "punch":
             punches = focus_punches(words, emphasis, amt)
@@ -638,9 +643,82 @@ class Pipeline:
                     cr.music, cr.music_offset, cr.music_why = m, _music_offset(m, D, rnd), "random"
         return cr, choice
 
+    # ------------------------------------------------------------------ Story FX (beats, titles, streaks, texture)
+    @staticmethod
+    def _vibe_of(cin: dict, words: list, clip: Clip) -> str:
+        vibe = cin.get("vibe_override") or cin.get("vibe") or ""
+        if vibe not in vibes.VIBES:
+            vibe = vibes.detect(words, None, str((clip.reasons or {}).get("vibe") or ""))["vibe"]
+        return vibe
+
+    def _story(self, s: Settings, cin: dict, prep: dict, clip: Clip, index: int, lang: str, choice: "StyleChoice",
+               hook_text: Optional[str], fps: int, tracks: Optional[list] = None, media: str = "",
+               src_offset: float = 0.0, src_wh: tuple = (0, 0)) -> tuple[dict, dict]:
+        """Plan the Story FX for a Short and return (prep re-timed for the freezes, story plan)."""
+        words, D, pieces = prep["words"], prep["D"], prep["pieces"]
+        try:
+            opts = story_fx.options(s, cin.get("story"))
+            vibe = self._vibe_of(cin, words, clip)
+            seed = int(cin.get("seed") or vibes.seed_for(clip.start, index)) + 7919 * int(cin.get("reshuffle") or 0)
+            title = ((hook_text or clip.title) or "").strip() if choice.hook_style else ""
+            cap = CAPTION_STYLES.get(choice.caption_style, {})
+            sp = story_fx.plan(words, D, pieces, vibe, seed, title, clip.keywords, lang, prep["layout"], opts,
+                               bool((clip.reasons or {}).get("cold_open")), getattr(s, "watermark", ""),
+                               cap.get("active") or cap.get("primary") or "#FFE400", _seams(pieces), fps,
+                               *face_top(tracks, pieces, prep["layout"], media, src_offset, prep.get("camera"), src_wh))
+        except Exception as e:      # Story FX is a bonus: never fail a Short over it
+            self.log(f"  (story effects skipped: {e})")
+            sp = story_fx.plan([], 0, [], "story", 0, "", [], lang, "blur_fit", {"level": "off"}, False)
+        fr = sp["freezes"]
+        if not fr:
+            return prep, sp
+        return ({**prep, "words": story_fx.shift_words(words, fr), "camera": story_fx.shift_camera(prep["camera"], fr),
+                 "D": sp["D"]}, sp)
+
+    @staticmethod
+    def _story_job(sp: dict) -> dict:
+        """The part of the story plan the renderer needs."""
+        return {"spans": sp.get("spans") or [], "streaks": sp.get("streaks") or [], "leaks": sp.get("leaks") or [],
+                "texture": sp.get("texture")}
+
+    def _story_ass(self, sp: dict, path: Path) -> str:
+        if not (sp.get("title") or sp.get("beats")):
+            return ""
+        path.write_text(story_fx.ass(sp), encoding="utf-8")
+        return str(path)
+
+    def _cutout(self, job: "RenderJob", sp: dict, work: Path, stem: str) -> None:
+        """Speaker cut-out for the title window, so the big title can sit behind the speaker."""
+        from . import cutout
+        from .renderer import mask_pass_args
+        from .utils import run_ffmpeg
+        tl = sp.get("title")
+        if not (tl and sp.get("behind") and cutout.available()):
+            return
+        end = tl["t1"] + 0.3
+        if sp.get("spans"):
+            end = min(end, sp["spans"][0][0])
+        frames = max(2, int(end * job.fps))
+        fdir = work / f"{stem}_cut"
+        try:
+            if fdir.exists():
+                shutil.rmtree(fdir, ignore_errors=True)
+            fdir.mkdir(parents=True, exist_ok=True)
+            run_ffmpeg(mask_pass_args(job, str(fdir / "mk_%05d.png"), frames), frames / job.fps,
+                       cancel=self.cancel, cwd=ffmpeg_cwd())
+            n = cutout.make_masks(fdir, frames, fdir, job.fps, self.cancel)
+            if n:
+                job.mask_pattern, job.mask_n = str(fdir / "mask_%05d.png"), n
+                job.title_win = (tl["t0"], tl["t1"])
+            else:
+                self.log("  (title stays in front: no clear speaker in the opening frames)")
+        except Exception as e:
+            self.log(f"  (title cut-out skipped: {str(e).splitlines()[0][:120] if str(e) else type(e).__name__})")
+
     # ------------------------------------------------------------------ audio helpers (export + live preview)
     def _sfx_track(self, s: Settings, words: list, D: float, cap: dict, choice: "StyleChoice", plan, emphasis: set,
-                   pieces: list, punch: list, out: str, cr: Optional["Creative"] = None) -> str:
+                   pieces: list, punch: list, out: str, cr: Optional["Creative"] = None,
+                   sp: Optional[dict] = None) -> str:
         level = sfx.resolve_level(getattr(s, "sfx_level", "auto"), words, D)
         if level == "off":
             return ""
@@ -652,10 +730,15 @@ class Pipeline:
                 hook_end = float((choice.place or {}).get("hook_dur")
                                  or HOOK_STYLES.get(choice.hook_style or "", {}).get("dur") or 3.0)
             pts = [p[0] if isinstance(p, (list, tuple)) else p for p in punch]
+            fr = (sp or {}).get("freezes") or []
+            seams = [(story_fx.to_final(t, fr), r, j) for t, r, j in _seams(pieces)]
+            if (sp or {}).get("title"):
+                hook_end = max(hook_end, sp["title"]["t1"])
             events = sfx.plan(level, D, words, chunk_starts, cap, hook_anim, choice.intro, choice.motion, pts,
                               bool(choice.cta_style and s.cta_text.strip()), emphasis,
-                              seams=_seams(pieces), hook_end=hook_end,
-                              pack=cr.pack if cr else vibes.pack_for("story"), seed=cr.seed if cr else 0)
+                              seams=seams, hook_end=hook_end,
+                              pack=cr.pack if cr else vibes.pack_for("story"), seed=cr.seed if cr else 0,
+                              story=story_fx.sfx_events(sp) if sp else None)
             return sfx.mix_track(events, D, out, getattr(s, "sfx_volume", 0.55), level) or ""
         except Exception as e:  # sound effects are a bonus, never fail a render for them
             self.log(f"  (sound effects skipped: {e})")
@@ -702,18 +785,29 @@ class Pipeline:
         # framing doesn't change the timing: skip face tracking for the sound preview
         prep = self._prepare(c["media"]["file"], project["info"], transcript, cl,
                              dataclasses.replace(choice, layout="blur_fit"), int(c["index"]), off, None, s)
-        words, D, pieces = prep["words"], prep["D"], prep["pieces"]
+        cin = creative_inputs(c, edits)
+        fps = _out_fps(s.fps, project["info"].get("fps", 30))
+        prep["layout"] = c.get("framing") if choice.layout == "auto" and c.get("framing") in LAYOUTS else \
+            (choice.layout if choice.layout != "auto" else "blur_fit")
+        if not (project["info"]["width"] > project["info"]["height"] * 0.8):
+            prep["layout"] = "fit"
+        fprep, sp = self._story(s, cin, prep, cl, int(c["index"]), project.get("language", "en"), choice,
+                                hook or None, fps, c.get("tracks"), c["media"]["file"], off,
+                                (project["info"]["width"], project["info"]["height"]))
+        words, D, pieces = fprep["words"], fprep["D"], prep["pieces"]
+        fr = sp["freezes"]
         work = WORK / "preview"
         work.mkdir(parents=True, exist_ok=True)
         plan, emphasis = self._write_ass(work / f"{cid}_aud.ass", words, D, cl, choice, int(c["index"]),
-                                         project.get("language", "en"), hook or None, s)
-        cr, choice = self.creative(s, creative_inputs(c, edits), words, D, pieces, choice, cl, int(c["index"]),
-                                   emphasis, extra, log=False)
+                                         project.get("language", "en"), hook or None, s, sp)
+        cr, choice = self.creative(s, cin, words, D, pieces, choice, cl, int(c["index"]),
+                                   emphasis, extra, log=False, shift=lambda t: story_fx.to_final(t, fr))
         cap = CAPTION_STYLES.get(choice.caption_style, {})
         fx = self._sfx_track(s, words, D, cap, choice, plan, emphasis, pieces, cr.punches,
-                             str(work / f"{cid}_fx.wav"), cr)
+                             str(work / f"{cid}_fx.wav"), cr, sp)
         music, moff = cr.music, cr.music_offset
         info = cr.to_json()
+        info["story"] = sp
         # so the live captions match the export exactly: emphasised words and each caption's tilt
         info["emphasis"] = sorted(emphasis)
         if cap.get("tilt"):
@@ -777,19 +871,26 @@ class Pipeline:
         work = WORK / "preview"
         work.mkdir(parents=True, exist_ok=True)
         ass_file = work / f"{cid}_preview.ass"
-        _plan, emphasis = self._write_ass(ass_file, prep["words"], prep["D"], cl, choice, int(c["index"]),
-                                          project.get("language", "en"), hook or None)
-        cr, choice = self.creative(self.s, creative_inputs(c, edits), prep["words"], prep["D"], prep["pieces"],
-                                   choice, cl, int(c["index"]), emphasis, {"no_music": True}, log=False)
+        cin = creative_inputs(c, edits)
+        fps = _out_fps(self.s.fps, info.get("fps", 30))
+        lang = project.get("language", "en")
+        fprep, sp = self._story(self.s, cin, prep, cl, int(c["index"]), lang, choice, hook or None, fps,
+                                c.get("tracks"), c["media"]["file"], off, (info["width"], info["height"]))
+        fr = sp["freezes"]
+        _plan, emphasis = self._write_ass(ass_file, fprep["words"], fprep["D"], cl, choice, int(c["index"]),
+                                          lang, hook or None, None, sp)
+        cr, choice = self.creative(self.s, cin, fprep["words"], fprep["D"], prep["pieces"],
+                                   choice, cl, int(c["index"]), emphasis, {"no_music": True}, log=False,
+                                   shift=lambda x: story_fx.to_final(x, fr))
         cap = CAPTION_STYLES.get(choice.caption_style, {})
         job = RenderJob(src=c["media"]["file"], start=cl.start, end=cl.end, parts=prep["pieces"], out_path=out_png,
                         src_w=info["width"], src_h=info["height"], ass_file=str(ass_file), layout=prep["layout"],
-                        camera=prep["camera"], grade=choice.color_grade, progress_bar=self.s.progress_bar,
+                        camera=fprep["camera"], grade=choice.color_grade, progress_bar=self.s.progress_bar,
                         accent=cap.get("active") or cap.get("primary") or "#FFE400", has_audio=False,
-                        motion=choice.motion, intro=choice.intro, punch_times=cr.punches,
-                        fps=_out_fps(self.s.fps, info.get("fps", 30)),
-                        src_offset=off, **_frame_args(choice.place))
-        return preview_frame(job, max(0.0, min(t, prep["D"] - 0.05)), out_png), prep["D"]
+                        motion=choice.motion, intro=choice.intro, punch_times=cr.punches, fps=fps,
+                        src_offset=off, freezes=fr, story=self._story_job(sp),
+                        story_ass=self._story_ass(sp, work / f"{cid}_story.ass"), **_frame_args(choice.place))
+        return preview_frame(job, max(0.0, min(t, fprep["D"] - 0.05)), out_png), fprep["D"]
 
     def process(self, item: SourceItem) -> list[ShortResult]:
         """Classic one-click run: analyse, then export every clip (several at once when the machine can)."""
@@ -923,17 +1024,19 @@ class Pipeline:
                 "words_abs": words_abs, "D": D}
 
     def _write_ass(self, ass_file: Path, words: list, D: float, clip: Clip, choice: StyleChoice, index: int,
-                   lang: str, hook_text: Optional[str], settings: Optional[Settings] = None) -> tuple[TextPlan, set]:
+                   lang: str, hook_text: Optional[str], settings: Optional[Settings] = None,
+                   sp: Optional[dict] = None) -> tuple[TextPlan, set]:
         s = settings or self.s
         emphasis = {k.lower() for k in clip.keywords[:4]} | {
             re.sub(r"[^\w']", "", w["w"].lower()) for w in words if re.sub(r"[^\w']", "", w["w"].lower()) in INTENSE}
         plan = TextPlan(
             caption_style=choice.caption_style, hook_style=choice.hook_style, cta_style=choice.cta_style,
-            hook_text=(hook_text or clip.title) if choice.hook_style else "",
+            hook_text=((hook_text or clip.title) if choice.hook_style else "") if not (sp or {}).get("title") else "",
             cta_text=s.cta_text, watermark=s.watermark,
             part_label="",  # no "Part 1/2" labels
             position=choice.position, language=lang, emphasis=emphasis, seed=index * 7919 + 13,
             place=dict(choice.place or {}),
+            blackouts=[tuple(x) for x in (sp or {}).get("blackouts") or []],
         )
         ass_file.write_text(build_ass(words, D, plan), encoding="utf-8")
         return plan, emphasis
@@ -948,22 +1051,31 @@ class Pipeline:
         off = float(extra.get("src_offset") or 0.0)
         prep = extra.get("prep") or self._prepare(src, info, transcript, clip, choice, index, off,
                                                   extra.get("tracks"), s)
-        layout, words, camera, pieces = prep["layout"], prep["words"], prep["camera"], prep["pieces"]
-        words_abs, D = prep["words_abs"], prep["D"]
+        cin = dict(extra.get("creative") or {})
+        cin.setdefault("seed", vibes.seed_for(item.vid, index))
+        fps = _out_fps(s.fps, info.get("fps", 30))
+        fprep, sp = self._story(s, cin, prep, clip, index, lang, choice, extra.get("hook_text"), fps,
+                                extra.get("tracks"), src, off, (info["width"], info["height"]))
+        layout, words, camera, pieces = fprep["layout"], fprep["words"], fprep["camera"], prep["pieces"]
+        words_abs, D = prep["words_abs"], fprep["D"]
+        fr = sp["freezes"]
 
         stem = f"{index + 1:02d} - {safe_name(clip.title, 50)}"
         ass_file = work / f"{index + 1:02d}.ass"
-        plan, emphasis = self._write_ass(ass_file, words, D, clip, choice, index, lang, extra.get("hook_text"), s)
+        plan, emphasis = self._write_ass(ass_file, words, D, clip, choice, index, lang, extra.get("hook_text"), s, sp)
 
         cap = CAPTION_STYLES.get(choice.caption_style, {})
         accent = cap.get("active") or cap.get("primary") or "#FFE400"
-        cin = dict(extra.get("creative") or {})
-        cin.setdefault("seed", vibes.seed_for(item.vid, index))
-        cr, choice = self.creative(s, cin, words, D, pieces, choice, clip, index, emphasis, extra)
+        cr, choice = self.creative(s, cin, words, D, pieces, choice, clip, index, emphasis, extra,
+                                   shift=lambda t: story_fx.to_final(t, fr))
         music, music_offset = cr.music, cr.music_offset
         self.log(f"  Short {index + 1}: vibe {vibes.VIBES[cr.vibe]['name']} · sounds {cr.pack} · "
                  f"{len(cr.punches)} focus zooms · opening {cr.intro}"
                  + (f" · music “{Path(music).stem}”" if music else ""))
+        if sp["level"] != "off":
+            self.log(f"  Short {index + 1}: story FX · {len(fr)} beat(s)"
+                     + (f" · {sp['title']['look']} title" if sp.get("title") else "")
+                     + f" · {len(sp['streaks'])} streak(s)" + (" · film texture" if sp.get("texture") else ""))
         out_path = out_dir / f"{stem}.mp4"
         # clean up an older render of the same slot (title may differ after re-style)
         for old in out_dir.glob(f"{index + 1:02d} - *.mp4"):
@@ -977,7 +1089,7 @@ class Pipeline:
                     pass
         punch = cr.punches
         sfx_file = self._sfx_track(s, words, D, cap, choice, plan, emphasis, pieces, punch,
-                                   str(work / f"{index + 1:02d}_sfx.wav"), cr)
+                                   str(work / f"{index + 1:02d}_sfx.wav"), cr, sp)
         job = RenderJob(
             src=src, start=clip.start, end=clip.end, parts=pieces, out_path=str(out_path), src_w=info["width"],
             src_h=info["height"], ass_file=str(ass_file), layout=layout, camera=camera,
@@ -985,11 +1097,13 @@ class Pipeline:
             punch_times=punch, progress_bar=s.progress_bar, accent=accent, sfx=sfx_file,
             has_audio=info["has_audio"], loudnorm=s.loudnorm, music=music, music_volume=s.music_volume,
             music_auto=getattr(s, "music_auto", True), music_offset=music_offset,
-            fps=_out_fps(s.fps, info.get("fps", 30)), crf=s.quality_crf, encoder=s.encoder,
+            fps=fps, crf=s.quality_crf, encoder=s.encoder,
             speed=getattr(s, "encode_speed", "fast"),
             src_offset=off, out_h=int(extra.get("out_h") or 1920), codec=extra.get("codec") or "h264",
+            freezes=fr, story=self._story_job(sp), story_ass=self._story_ass(sp, work / f"{index + 1:02d}_story.ass"),
             **_frame_args(choice.place),
         )
+        self._cutout(job, sp, work, f"{index + 1:02d}")
         t0 = time.time()
         pr = extra.get("project_ref") or {}
         slot = f"{pr.get('project')}/{pr.get('clip')}" if pr else f"{item.vid}/{index}"
@@ -1030,7 +1144,7 @@ class Pipeline:
             "style": asdict(choice), "resolved_layout": layout, "hook_text": plan.hook_text,
             "language": lang, "words_abs": words_abs, "meta": meta, "output": str(out_path), "thumb": thumb,
             "created": time.time(), "prep": prep, "music": music, "music_offset": music_offset,
-            "project_ref": extra.get("project_ref"), "creative": cr.to_json(),
+            "project_ref": extra.get("project_ref"), "creative": cr.to_json(), "story": sp,
         }, ensure_ascii=False, indent=1), encoding="utf-8")
         return ShortResult(str(out_path), thumb, plan.hook_text or meta["title"], clip.start, clip.end, clip.score,
                            choice.label(), plan_file, meta)
@@ -1098,16 +1212,24 @@ class Pipeline:
         work = WORK / "preview"
         work.mkdir(parents=True, exist_ok=True)
         ass_file = work / "preview.ass"
-        self._write_ass(ass_file, prep["words"], prep["D"], clip, choice, data["index"],
-                        data.get("language", "en"), hook_text or data.get("hook_text", ""))
-        cap = CAPTION_STYLES.get(choice.caption_style, {})
         info = data["info"]
+        fps = _out_fps(self.s.fps, info.get("fps", 30))
+        cr0 = data.get("creative") or {}
+        hk = hook_text or data.get("hook_text", "")
+        fprep, sp = self._story(self.s, {"vibe": cr0.get("vibe", ""), "seed": cr0.get("seed")}, prep, clip,
+                                data["index"], data.get("language", "en"), choice, hk, fps, None, src,
+                                float(data.get("src_offset") or 0.0), (info["width"], info["height"]))
+        self._write_ass(ass_file, fprep["words"], fprep["D"], clip, choice, data["index"],
+                        data.get("language", "en"), hk, None, sp)
+        cap = CAPTION_STYLES.get(choice.caption_style, {})
         job = RenderJob(src=src, start=clip.start, end=clip.end, parts=prep["pieces"], out_path=out_png,
                         src_w=info["width"], src_h=info["height"], ass_file=str(ass_file), layout=prep["layout"],
-                        camera=prep["camera"], grade=choice.color_grade, progress_bar=self.s.progress_bar,
-                        accent=cap.get("active") or cap.get("primary") or "#FFE400", has_audio=False,
-                        src_offset=float(data.get("src_offset") or 0.0), **_frame_args(choice.place))
-        return preview_frame(job, t, out_png), prep["D"]
+                        camera=fprep["camera"], grade=choice.color_grade, progress_bar=self.s.progress_bar,
+                        accent=cap.get("active") or cap.get("primary") or "#FFE400", has_audio=False, fps=fps,
+                        src_offset=float(data.get("src_offset") or 0.0), freezes=sp["freezes"],
+                        story=self._story_job(sp), story_ass=self._story_ass(sp, work / "preview_story.ass"),
+                        **_frame_args(choice.place))
+        return preview_frame(job, t, out_png), fprep["D"]
 
 
 def make_proxy(project: dict, cid: str) -> dict:
@@ -1221,6 +1343,40 @@ def slice_track(cached: list, a: float, b: float) -> Optional[dict]:
             out["coverage"] = hits / len(out["cx"]) if out["cx"] else 0.0
             return out
     return None
+
+
+def face_top(cached: Optional[list], pieces: list, layout: str, media: str = "", src_offset: float = 0.0,
+             camera: Optional[list] = None, src_wh: tuple = (0, 0)) -> tuple[Optional[float], bool]:
+    """(top of the speaker's head in the finished frame in px of 1920, measured by the cut-out model?) over the
+    opening, for the face-following framings. The cut-out measurement is exact and also means the title can go
+    behind the head; the face-tracker estimate is the fallback."""
+    if not pieces or layout not in ("smart_crop", "center_crop", "zoom45"):
+        return None, False
+    a, b = float(pieces[0][0]), float(pieces[0][1])
+    sw, sh = src_wh
+    if media and sw and sh:
+        from . import cutout
+        if cutout.available():
+            cw = sh * 9 / 16
+            x = (camera[0][1] if camera else (sw - cw) / 2)
+            top = cutout.head_top_at(media, max(0.0, a - src_offset + 0.6), x / sw, (x + cw) / sw)
+            if top is not None:
+                if layout == "zoom45":
+                    return (1920 - 1350) / 2 - 1920 * 0.03 + top * 1350, True
+                return top * 1920, True
+    if not cached:
+        return None, False
+    tr = slice_track(cached, a, min(b, a + 4.0))
+    if not tr:
+        return None, False
+    tops = sorted(cy - 0.62 * sz for t, cy, sz in zip(tr["times"], tr["cy"], tr["size"])
+                  if t <= 3.5 and cy == cy and sz == sz)
+    if len(tops) < 2:
+        return None, False
+    top = tops[len(tops) // 2]
+    if layout == "zoom45":
+        return (1920 - 1350) / 2 - 1920 * 0.03 + top * 1350, False
+    return top * 1920, False
 
 
 def _seams(pieces: list) -> list:

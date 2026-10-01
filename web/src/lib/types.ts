@@ -19,6 +19,7 @@ export type Edits = {
   place?: Place;
   audio?: { music?: string; music_volume?: number | null; sfx_level?: string; sfx_pack?: string; music_mood?: string;
     seed?: number; music_offset?: number | null };
+  story?: StoryEdits;
   zooms?: number[] | null;       // focus zoom moments (absolute source seconds); missing = automatic
   zoom_mult?: number;            // focus zoom strength (1 = the vibe's default)
   vibe?: string;                 // override the detected vibe
@@ -102,3 +103,5 @@ export type LibItem = {
 };
 
 export type Settings = Record<string, any>;
+
+export type StoryEdits = { level?: string; pauses?: boolean; titles?: boolean; transitions?: boolean; textures?: boolean; behind?: boolean };

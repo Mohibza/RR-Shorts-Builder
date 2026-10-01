@@ -336,6 +336,7 @@ class TextPlan:
     # cap_y/hook_y/cta_y = centre as a fraction of the height, cap_scale/hook_scale = size multiplier,
     # hook_dur = seconds on screen, wm_pos = top | top_left | top_right | bottom | bottom_left | bottom_right
     place: dict = field(default_factory=dict)
+    blackouts: list = field(default_factory=list)   # [(start, end)] when no caption shows (Story FX freezes)
 
 
 WM_POSITIONS = {"top": "Top centre", "top_left": "Top left", "top_right": "Top right",
@@ -486,6 +487,9 @@ def build_captions(ab: AssBuilder, words: list[dict], clip_dur: float, plan: Tex
         if nxt - ch[-1]["e"] < 0.3:
             ce = nxt
         ce = min(ce, clip_dur)
+        for ba, _bb in plan.blackouts or []:     # Story FX freeze: the caption steps aside for the beat text
+            if ch[-1]["e"] - 0.05 <= ba < ce:
+                ce = max(cs + 0.05, ba)
         toks = [_clean_word(w["w"], upper) for w in ch]
         fs = fit_size(fam, " ".join(toks), size, st, rtl)
         split = None  # word index where a 2nd line starts (big text stacks instead of shrinking)

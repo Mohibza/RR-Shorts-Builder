@@ -95,9 +95,15 @@ def _smooth(x: str) -> str:
     return f"(({x})*({x})*(3-2*({x})))"
 
 
-def motion_exprs(motion: str, dur: float, punches: list, intro: str, fps: int = 30, at: float | None = None):
+FREEZE_PUSH, FREEZE_BACK, STREAK_Z, STREAK_W = 0.075, 0.22, 0.07, 0.2
+
+
+def motion_exprs(motion: str, dur: float, punches: list, intro: str, fps: int = 30, at: float | None = None,
+                 story: dict | None = None):
     """(z, dx, dy) as FFmpeg expressions of t. dx/dy are fractions of the frame width/height.
-    `at` = evaluate for one fixed time (exact-frame stills)."""
+    `at` = evaluate for one fixed time (exact-frame stills). `story` (Story FX, final timeline): the camera keeps
+    pushing in through every freeze and snaps back after it; every streak gets a quick whip zoom.
+    Mirrored number for number in web/src/lib/fx.ts (motionAt)."""
     D = max(dur, 0.1)
     t = f"(in/{fps})" if at is None else f"({at:.4f})"
     dx = dy = "0"
@@ -130,6 +136,14 @@ def motion_exprs(motion: str, dur: float, punches: list, intro: str, fps: int = 
         f = _smooth(f"clip(({e:.3f}-{t})/{FOCUS_FALL},0,1)")
         terms.append(f"{amt:.4f}*min({r},{f})")
     extra = list(terms)
+    for a, b in (story or {}).get("spans") or []:
+        d = max(0.05, b - a)
+        push = _smooth(f"clip(({t}-{a:.3f})/{d:.3f},0,1)")
+        back = _smooth(f"clip(({b + FREEZE_BACK:.3f}-{t})/{FREEZE_BACK},0,1)")
+        extra.append(f"{FREEZE_PUSH}*{push}*{back}")
+    for T in (story or {}).get("streaks") or []:
+        extra.append(f"{STREAK_Z}*pow(max(0,1-abs({t}-{T:.3f})/{STREAK_W}),2)")
+        dx = f"({dx})+0.018*pow(max(0,1-abs({t}-{T:.3f})/{STREAK_W}),2)*({t}-{T:.3f})/{STREAK_W}"
     if intro == "zoom_slam":
         extra.append(f"0.38*(1-{_smooth(f'clip({t}/0.42,0,1)')})")
     elif intro == "punch_in":
@@ -152,14 +166,14 @@ def motion_exprs(motion: str, dur: float, punches: list, intro: str, fps: int = 
 
 
 def motion_filters(motion: str, dur: float, punches: list, intro: str, fps: int = 30,
-                   at: float | None = None) -> str | None:
+                   at: float | None = None, story: dict | None = None) -> str | None:
     """Sub-pixel smooth camera motion as a `perspective` filter (fixed output size, no jitter).
 
     The zoom factor z(t) picks a window of size W/z x H/z (plus an offset) in the frame and stretches it to
     the full frame with cubic interpolation, so zooms glide instead of stepping in whole pixels. The window
     is kept inside the frame (offsets are clamped), so no edges ever show. Works at any resolution, so the
     renderer runs it on the small source crop before upscaling (much faster)."""
-    ex = motion_exprs(motion, dur, punches, intro, fps, at)
+    ex = motion_exprs(motion, dur, punches, intro, fps, at, story)
     if not ex:
         return None
     z, dx, dy = ex

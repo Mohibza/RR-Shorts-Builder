@@ -53,6 +53,12 @@ FONT_SOURCES.update({
     "Special Elite": ("SpecialElite-Regular.ttf", GF2 + "apache/specialelite/SpecialElite-Regular.ttf"),
     "Satisfy": ("Satisfy-Regular.ttf", GF2 + "apache/satisfy/Satisfy-Regular.ttf"),
     "Boogaloo": ("Boogaloo-Regular.ttf", GF2 + "ofl/boogaloo/Boogaloo-Regular.ttf"),
+    # editorial (Story FX titles)
+    "Abril Fatface": ("AbrilFatface-Regular.ttf", GF2 + "ofl/abrilfatface/AbrilFatface-Regular.ttf"),
+    "DM Serif Display": ("DMSerifDisplay-Regular.ttf", GF2 + "ofl/dmserifdisplay/DMSerifDisplay-Regular.ttf"),
+    "Lato": ("Lato-Regular.ttf", GF2 + "ofl/lato/Lato-Regular.ttf"),
+    "Lato Light": ("Lato-Light.ttf", GF2 + "ofl/lato/Lato-Light.ttf"),
+    "Lato Bold": ("Lato-Bold.ttf", GF2 + "ofl/lato/Lato-Bold.ttf"),
 })
 
 # If a font can't be downloaded, Windows always has these.
@@ -62,7 +68,7 @@ WINDOWS_FALLBACK = {
     "Poppins Black": "Arial Black", "Archivo Black": "Arial Black", "Rubik Mono One": "Arial Black",
     "Noto Nastaliq Urdu": "Arial", "Noto Naskh Arabic": "Arial", "Noto Sans Devanagari": "Nirmala UI",
 }
-WINDOWS_FALLBACK.update({ "Bungee": "Impact", "Righteous": "Segoe UI", "Pacifico": "Segoe Script", "Lobster": "Segoe Script", "Russo One": "Arial Black", "Black Ops One": "Impact", "Staatliches": "Impact", "Titan One": "Arial Black", "Chewy": "Comic Sans MS", "Bowlby One": "Arial Black", "Passion One": "Impact", "Lilita One": "Arial Black", "Monoton": "Impact", "Kanit Black": "Arial Black", "Caveat Brush": "Comic Sans MS", "Shrikhand": "Arial Black", "Bungee Shade": "Impact", "Press Start 2P": "Consolas", "Sigmar One": "Arial Black", "Alfa Slab One": "Rockwell", "Special Elite": "Courier New", "Satisfy": "Segoe Script", "Boogaloo": "Comic Sans MS",})
+WINDOWS_FALLBACK.update({ "Bungee": "Impact", "Righteous": "Segoe UI", "Pacifico": "Segoe Script", "Lobster": "Segoe Script", "Russo One": "Arial Black", "Black Ops One": "Impact", "Staatliches": "Impact", "Titan One": "Arial Black", "Chewy": "Comic Sans MS", "Bowlby One": "Arial Black", "Passion One": "Impact", "Lilita One": "Arial Black", "Monoton": "Impact", "Kanit Black": "Arial Black", "Caveat Brush": "Comic Sans MS", "Shrikhand": "Arial Black", "Bungee Shade": "Impact", "Press Start 2P": "Consolas", "Sigmar One": "Arial Black", "Alfa Slab One": "Rockwell", "Special Elite": "Courier New", "Satisfy": "Segoe Script", "Boogaloo": "Comic Sans MS", "Abril Fatface": "Georgia", "DM Serif Display": "Georgia", "Lato": "Segoe UI", "Lato Light": "Segoe UI Light", "Lato Bold": "Segoe UI",})
 
 
 def fonts_dir() -> Path:

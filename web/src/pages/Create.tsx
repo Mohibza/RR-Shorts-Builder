@@ -100,6 +100,8 @@ export function CreatePage() {
           <Field label="Sound effects"><Seg value={s.sfx_level || "auto"} options={[["auto", "Auto"], ["off", "Off"], ["subtle", "Subtle"], ["medium", "Energetic"], ["high", "Max"]]} onChange={(v) => set({ sfx_level: v })} /></Field>
           <Field label="Sound pack" hint="Auto picks the pack from each clip's vibe (hype, emotional, funny…)."><Select value={s.sfx_pack || "auto"} options={Object.entries(cat?.sfx_packs || { auto: "Auto" }) as [string, string][]} onChange={(v) => set({ sfx_pack: v })} /></Field>
           <Field label="Music"><div className="row gap"><Toggle on={!!s.add_music} onChange={(v) => set({ add_music: v })} /><button className="linkbtn" onClick={() => go("music")}>Choose tracks</button></div></Field>
+          <Field label="Story FX" hint="Pro storytelling: a dramatic pause before the payoff, a magazine title behind the speaker, motion-blur transitions and a film look.">
+            <Seg value={s.story_fx || "auto"} options={[["off", "Off"], ["auto", "Auto"], ["strong", "Strong"]]} onChange={(v) => set({ story_fx: v })} /></Field>
           <button className="adv-btn" onClick={() => setAdv(!adv)}><Icon name="sliders" size={16} /> Advanced <Icon name={adv ? "down" : "right"} size={14} /></button>
         </section>
         {adv && (
@@ -121,6 +123,13 @@ export function CreatePage() {
               <Toggle on={s.fast_mode !== false} onChange={(v) => set({ fast_mode: v })} label="Fast mode" hint="Downloads audio first, then only the chosen parts in HD." />
               <Toggle on={!!s.use_gpu} onChange={(v) => set({ use_gpu: v })} label="NVIDIA GPU for speech" />
             </div>
+            {(s.story_fx || "auto") !== "off" && <div className="adv-toggles">
+              <Toggle on={s.story_pauses !== false} onChange={(v) => set({ story_pauses: v })} label="Dramatic beats" hint="Freeze-frame pause before the payoff line, with a riser and a hit" />
+              <Toggle on={s.story_titles !== false} onChange={(v) => set({ story_titles: v })} label="Editorial title" hint="The hook as a magazine-style title (replaces the hook banner) + text during each beat" />
+              <Toggle on={s.story_behind !== false} onChange={(v) => set({ story_behind: v })} label="Title behind speaker" hint="Automatic person cut-out so the big word sits behind them" />
+              <Toggle on={s.story_transitions !== false} onChange={(v) => set({ story_transitions: v })} label="Streak transitions" />
+              <Toggle on={s.story_textures !== false} onChange={(v) => set({ story_textures: v })} label="Film texture" hint="Grain, glow, light leaks" />
+            </div>}
           </section>
         )}
         <Recent />

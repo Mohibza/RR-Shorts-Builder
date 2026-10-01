@@ -5,7 +5,7 @@ import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo
 import { api, mediaUrl } from "../lib/api";
 import { drawLayout, type FrameParams } from "../lib/frame";
 import { buildTimeline, cameraAt, chunkWords, cleanWord, fmt, segAt, type Timeline } from "../lib/timeline";
-import { focusWindows, introAt, motionAt, type FocusWin } from "../lib/fx";
+import { focusWindows, introAt, motionAt, storyAt, toFinal, toPre, type FocusWin, type StoryEl, type StoryPlan } from "../lib/fx";
 import { publishTime } from "../lib/playtime";
 import type { CapStyle, Catalog, Clip, CtaStyle, Edits, HookStyle, Place, Style } from "../lib/types";
 import { Icon } from "./Icon";
@@ -89,6 +89,13 @@ export type FxPlan = {
   emphasis?: string[]; tilts?: number[];
   vibe: string; vibe_name: string; seed: number; punches: [number, number][]; pack: string; pack_name: string;
   music: string; music_name: string; music_offset: number; music_why: string; motion: string; intro: string; grade: string;
+  story?: StoryPlan | null;
+};
+
+// ASS \an alignment -> where the anchor point sits on the text box
+const AN: Record<number, [string, string]> = {
+  1: ["0", "-100%"], 2: ["-50%", "-100%"], 3: ["-100%", "-100%"], 4: ["0", "-50%"], 5: ["-50%", "-50%"],
+  6: ["-100%", "-50%"], 7: ["0", "0"], 8: ["-50%", "0"], 9: ["-100%", "0"],
 };
 
 export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p, ref) {
@@ -129,7 +136,25 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
     [clip.id, clip.words, JSON.stringify(edits.trim), JSON.stringify(edits.cut), JSON.stringify(edits.fix), settings.remove_pauses]);
   const tlRef = useRef(tl);
   tlRef.current = tl;
-  const D = tl.D;
+  // Story FX: freezes hold the picture (the clock, music and effects keep going), so the Short gets longer
+  const [story, setStory] = useState<StoryPlan | null>(null);
+  const freezes = story?.freezes || [];
+  const frRef = useRef(freezes);
+  frRef.current = freezes;
+  const spans = story?.spans || [];
+  const D = tl.D + freezes.reduce((x, f) => x + f.d, 0);
+  const Dref = useRef(D);
+  Dref.current = D;
+  const tlF = useMemo(() => freezes.length ? { ...tl, words: tl.words.map((w) => ({ ...w, T: toFinal(w.T, freezes), TE: toFinal(w.TE, freezes) })) } : tl,
+    [tl, JSON.stringify(freezes)]);
+  // the freeze being held right now: elapsed0 + running clock
+  const frozen = useRef<{ i: number; base: number; d: number; el0: number; at: number; run: boolean } | null>(null);
+  const handled = useRef(new Set<number>());
+  const lastPre = useRef(0);
+  const streakBlur = useRef<SVGFEGaussianBlurElement>(null);
+  const leakEl = useRef<HTMLDivElement>(null);
+  const flashEl = useRef<HTMLDivElement>(null);
+  const filterId = useMemo(() => "hb" + Math.random().toString(36).slice(2, 8), []);
 
   const audioKey = p.withAudio ? JSON.stringify([clip.id, edits.trim, edits.cut, edits.fix, edits.hook, edits.audio, edits.style, edits.place, edits.zooms, edits.zoom_mult, edits.vibe]) : "";
   useEffect(() => {
@@ -138,7 +163,7 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
     const id = setTimeout(() => {
       setAudioBusy(true);
       api<{ path: string; plan?: FxPlan }>("/api/clip/audio", { project: p.pid, clip: clip.id, edits })
-        .then((r) => { if (!live) return; setAudioSrc(r.path ? mediaUrl(r.path) : ""); if (r.plan) { setPlan(r.plan); p.onPlan?.(r.plan); } })
+        .then((r) => { if (!live) return; setAudioSrc(r.path ? mediaUrl(r.path) : ""); if (r.plan) { setPlan(r.plan); setStory(r.plan.story && r.plan.story.level !== "off" ? r.plan.story : null); p.onPlan?.(r.plan); } })
         .catch(() => { if (live) setAudioSrc(""); })
         .finally(() => live && setAudioBusy(false));
     }, 450);
@@ -167,12 +192,22 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
 
   const seekAbsFor = useCallback((Tq: number) => {
     const t = tlRef.current;
-    const i = segAt(t, Tq);
+    const fr = frRef.current;
+    const [pre, fi] = toPre(Tq, fr);
+    const i = segAt(t, pre);
     const g = t.segs[i];
     const v = cur();
     if (!g || !v) return;
     segIdx.current = i;
-    v.currentTime = Math.max(0, g.a + Math.max(0, Tq - g.t0) - off);
+    v.currentTime = Math.max(0, g.a + Math.max(0, pre - g.t0) - off);
+    handled.current = new Set(fr.map((f, k) => (f.t < pre - 1e-3 ? k : -1)).filter((k) => k >= 0));
+    if (fi >= 0) {
+      const sorted = [...fr].sort((a, b) => a.t - b.t);
+      const base = toFinal(sorted[fi].t, fr);
+      frozen.current = { i: fi, base, d: sorted[fi].d, el0: Tq - base, at: performance.now(), run: false };
+      handled.current.add(fi);
+    } else frozen.current = null;
+    lastPre.current = pre;
     Tref.current = Tq;
     setT(Tq);
     publishTime(Tq);
@@ -180,20 +215,28 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   }, [off, prepStandby]);
 
   // restart at the new first frame when the edit list changes
-  useEffect(() => { prepped.current = -1; seekAbsFor(Math.min(Tref.current, Math.max(0, D - 0.1))); }, [tl]);
+  useEffect(() => { prepped.current = -1; seekAbsFor(Math.min(Tref.current, Math.max(0, D - 0.1))); }, [tl, JSON.stringify(freezes)]);
 
   // everything that changes every frame is written straight to the DOM (no React re-render)
-  const fxRef = useRef<{ motion: string; intro: string; wins: FocusWin[]; D: number; keyFn: (t: number) => string }>({ motion: "none", intro: "none", wins: [], D: 1, keyFn: () => "" });
+  const fxRef = useRef<{ motion: string; intro: string; wins: FocusWin[]; D: number; keyFn: (t: number) => string; story: StoryPlan | null }>({ motion: "none", intro: "none", wins: [], D: 1, keyFn: () => "", story: null });
   const applyFrame = (Tn: number) => {
     const f = fxRef.current;
-    const [z, dx, dy] = motionAt(f.motion, f.intro, f.wins, Tn, f.D);
+    const [z, dx, dy] = motionAt(f.motion, f.intro, f.wins, Tn, f.D, f.story);
     const st = stageEl.current;
     if (st) {
       st.style.transform = `scale(${z}) translate(${-dx * 100}%, ${-dy * 100}%)`;
       const io = introAt(f.intro, Tn);
-      if (cur()?.paused) { io.alpha = 0; io.rgb = false; }   // flashes only while playing (no white still frame)
+      const live = !cur()?.paused || !!frozen.current?.run;
+      if (!live) { io.alpha = 0; io.rgb = false; }   // flashes only while playing (no white still frame)
+      const sx = storyAt(f.story, Tn);
       const grade = st.dataset.grade || "";
-      st.style.filter = (grade + (io.rgb ? " drop-shadow(6px 0 rgba(255,0,60,.8)) drop-shadow(-6px 0 rgba(0,220,255,.8))" : "")).trim() || "";
+      const k = (st.clientWidth || 300) / 1080;
+      if (streakBlur.current) streakBlur.current.setAttribute("stdDeviation", `${(sx.blur * k).toFixed(2)} 0`);
+      st.style.filter = (grade + (io.rgb ? " drop-shadow(6px 0 rgba(255,0,60,.8)) drop-shadow(-6px 0 rgba(0,220,255,.8))" : "")
+        + (sx.frozen ? " saturate(.38) brightness(.95) contrast(1.06)" : "") + (sx.blur > 0 ? ` url(#${filterId})` : "")).trim() || "";
+      st.classList.toggle("frozen", sx.frozen);
+      if (leakEl.current) leakEl.current.style.opacity = String(sx.leak);
+      if (flashEl.current) flashEl.current.style.opacity = String(live ? sx.flash : 0);
       const ie = introEl.current;
       if (ie) { ie.style.opacity = String(io.alpha); if (io.color) ie.style.background = io.color; }
     }
@@ -250,11 +293,40 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
         const a = cur()!;
         const gg = t.segs[segIdx.current];
         const absA = a.currentTime + off;
-        const Tn = gg.t0 + Math.max(0, Math.min(gg.b, absA) - gg.a);
+        const Tp = gg.t0 + Math.max(0, Math.min(gg.b, absA) - gg.a);     // cut timeline
+        // Story FX freezes: hold the frame, keep the clock running, then carry on
+        const fr = frRef.current;
+        let Tn = toFinal(Tp, fr);
+        const now = performance.now();
+        if (Tp < lastPre.current - 0.3) handled.current = new Set([...handled.current].filter((k) => fr[k] && fr[k].t < Tp));
+        const fz = frozen.current;
+        if (fz) {
+          const el = fz.el0 + (fz.run ? (now - fz.at) / 1000 : 0);
+          if (el >= fz.d) {
+            frozen.current = null;
+            if (fz.run) a.play().catch(() => {});
+            Tn = fz.base + fz.d;
+          } else Tn = fz.base + el;
+        } else if (!a.paused) {
+          const sorted = [...fr].sort((x, y) => x.t - y.t);
+          for (let k = 0; k < sorted.length; k++) {
+            const f = sorted[k];
+            if (!handled.current.has(k) && lastPre.current < f.t + 1e-3 && Tp >= f.t - 0.01) {
+              handled.current.add(k);
+              const base = toFinal(f.t, fr);
+              frozen.current = { i: k, base, d: f.d, el0: 0, at: now, run: true };
+              a.pause();
+              Tn = base;
+              break;
+            }
+          }
+        }
+        lastPre.current = Tp;
         Tref.current = Tn;
         const au = audio.current;
+        const running = !a.paused || !!frozen.current?.run;
         if (au && au.src) {
-          if (!a.paused) {
+          if (running) {
             if (au.paused) au.play().catch(() => {});
             if (Math.abs(au.currentTime - Tn) > 0.15) au.currentTime = Tn;
           } else if (!au.paused) au.pause();
@@ -262,7 +334,7 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
         applyFrame(Tn);
         const k = fxRef.current.keyFn(Tn);
         if (k !== lastKey) { lastKey = k; setT(Tn); }
-        if (Math.abs(Tn - lastPub) > 0.04) { lastPub = Tn; publishTime(Tn); p.onTime?.(Tn, t.D); }
+        if (Math.abs(Tn - lastPub) > 0.04) { lastPub = Tn; publishTime(Tn); p.onTime?.(Tn, Dref.current); }
         const c = canvas.current;
         const fp = frameRef.current;
         if (c && a.readyState >= 2 && (a.currentTime !== drawn.current.t || fp.v !== drawn.current.v || c.width !== drawn.current.w || act.current !== drawn.current.el)) {
@@ -278,11 +350,21 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
     return () => cancelAnimationFrame(raf);
   }, [off, p.loop, muted, prepStandby]);
 
-  const playPause = () => { const v = cur(); if (!v) return; if (v.paused) v.play().catch(() => {}); else v.pause(); };
+  const playPause = () => {
+    const v = cur();
+    if (!v) return;
+    const fz = frozen.current;
+    if (fz) {                                   // paused or playing inside a freeze: run/stop its clock
+      if (fz.run) { fz.el0 += (performance.now() - fz.at) / 1000; fz.run = false; setPlaying(false); }
+      else { fz.at = performance.now(); fz.run = true; setPlaying(true); }
+      return;
+    }
+    if (v.paused) v.play().catch(() => {}); else v.pause();
+  };
   useImperativeHandle(ref, () => ({
     seek: (x) => seekAbsFor(Math.max(0, Math.min(x, D - 0.05))),
-    play: () => { cur()?.play().catch(() => {}); },
-    pause: () => cur()?.pause(),
+    play: () => { const fz = frozen.current; if (fz) { if (!fz.run) { fz.at = performance.now(); fz.run = true; setPlaying(true); } } else cur()?.play().catch(() => {}); },
+    pause: () => { const fz = frozen.current; if (fz?.run) { fz.el0 += (performance.now() - fz.at) / 1000; fz.run = false; setPlaying(false); } cur()?.pause(); },
     toggle: playPause,
     time: () => Tref.current,
   }), [seekAbsFor, D]);
@@ -314,30 +396,34 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
 
   // ------------------------------------------------------------------ captions
   const cap: CapStyle | undefined = catalog?.captions[style.caption_style];
-  const chunks = useMemo(() => cap ? chunkWords(tl.words, cap.chunk, cap.maxchars) : [], [tl, cap]);
+  const chunks = useMemo(() => cap ? chunkWords(tlF.words, cap.chunk, cap.maxchars) : [], [tlF, cap]);
   const chunkAt = (t: number) => {
     for (let i = 0; i < chunks.length; i++) {
       const ch = chunks[i];
       const nxt = i + 1 < chunks.length ? chunks[i + 1][0].T : D;
       let ce = Math.min(nxt, ch[ch.length - 1].TE + 0.6);
       if (nxt - ch[ch.length - 1].TE < 0.3) ce = nxt;
+      ce = Math.min(ce, D);
+      for (const [ba] of spans) if (ch[ch.length - 1].TE - 0.05 <= ba && ba < ce) ce = Math.max(ch[0].T + 0.05, ba);
       if (t >= ch[0].T && t < ce) return i;
     }
     return -1;
   };
-  const hookKey0 = style.hook_style;
+  const hookKey0 = story?.title ? "" : style.hook_style;      // the editorial title replaces the hook banner
   const hook0: HookStyle | undefined = hookKey0 ? catalog?.hooks[hookKey0] : undefined;
   const hookEnd = hook0 ? Math.min(D, place.hook_dur ? Math.max(1, place.hook_dur) : hook0.dur || D) : 0;
   const wins = useMemo(() => focusWindows((plan?.punches || []) as [number, number][], D), [plan, D]);
   // what's on screen at time t: re-render only when this changes (word by word), not every frame
+  const storyEls = useMemo(() => [...(story?.title?.els || []), ...(story?.beats || []).flatMap((b) => b.els)], [story]);
   fxRef.current = {
-    motion, intro, wins, D,
+    motion, intro, wins, D, story,
     keyFn: (t: number) => {
       const ci = chunkAt(t);
       const ch = ci >= 0 ? chunks[ci] : null;
       const ai = ch ? ch.findIndex((w) => t >= w.T && t < w.TE + 0.02) : -1;
       const sp = ch ? ch.filter((w) => t >= w.T).length : 0;
-      return `${ci}|${ai}|${sp}|${t < hookEnd ? 1 : 0}|${t >= D - 2.6 ? 1 : 0}`;
+      const se = storyEls.map((e) => (t >= e.t0 && t < e.t1 ? (t > e.t1 - 0.26 ? 2 : 1) : 0)).join("");
+      return `${ci}|${ai}|${sp}|${t < hookEnd ? 1 : 0}|${t >= D - 2.6 ? 1 : 0}|${se}`;
     },
   };
   const emph = useMemo(() => new Set(plan?.emphasis || []), [plan]);
@@ -422,7 +508,7 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   }
 
   // ------------------------------------------------------------------ hook / CTA / watermark
-  const hookKey = style.hook_style;
+  const hookKey = story?.title ? "" : style.hook_style;
   const hook: HookStyle | undefined = hookKey ? catalog?.hooks[hookKey] : undefined;
   const hookText = (p.hookText ?? edits.hook ?? clip.clip.title ?? "").trim();
   let hookEl: React.ReactNode = null;
@@ -470,6 +556,41 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   const wm = settings.watermark?.trim();
   const wmPos = place.wm_pos || "top";
 
+  // ------------------------------------------------------------------ Story FX titles + beat text
+  const storyEl = storyEls.filter((e) => T >= e.t0 && T < e.t1).map((e, i) => {
+    const fam = e.font === "Lato" && e.bold ? "Lato Bold" : e.font;
+    const px = e.size * k;
+    const [ax, ay] = AN[e.an] || AN[5];
+    const anim = e.anim || [];
+    const names: string[] = [];
+    const durs: string[] = [];
+    if (anim.includes("fade")) { names.push("sfxFade"); durs.push(anim.includes("scale") ? "140ms" : "220ms"); }
+    if (anim.includes("scale")) { names.push("sfxScale"); durs.push("460ms"); }
+    else if (anim.includes("rise")) { names.push("sfxRise"); durs.push("380ms"); }
+    if (anim.includes("track")) { names.push("sfxTrack"); durs.push("800ms"); }
+    if (anim.includes("wipe")) { names.push("sfxWipe"); durs.push("650ms"); }
+    const out = T > e.t1 - 0.26;
+    const shadow = e.shadow ? `${3 * k}px ${5 * k}px ${Math.max(3, e.size / 28) * k * 2}px rgba(0,0,0,.45)` : "";
+    const glow = e.glow ? `0 0 ${(e.size / 9) * k}px rgba(255,255,255,.6), 0 0 ${(e.size / 4) * k}px rgba(255,255,255,.25)` : "";
+    return (
+      <div key={`${e.t0}:${e.text}:${i}`} className="story-el" style={{
+        left: e.x * k, top: e.y * k, transform: `translate(${ax}, ${ay}) translateY(${dyOf(fam) * px}px)`,
+        opacity: out ? 0 : 1, transition: out ? "opacity 260ms linear" : undefined,
+      }}>
+        <span style={{
+          fontFamily: `"${fam}", Georgia, serif`, fontSize: px * emOf(fam), lineHeight: `${px}px`, color: e.color,
+          textShadow: [shadow, glow].filter(Boolean).join(", ") || undefined,
+          ["--sp" as string]: `${Math.max(2, Math.floor(e.size * 0.05)) * k}px`, ["--rise" as string]: `${34 * k}px`,
+          // playing: run the entrance from where the clock is; paused / scrubbing: show the settled text
+          animationName: playing ? names.join(",") : "none", animationDuration: durs.join(","),
+          animationDelay: playing ? `${-Math.max(0, T - e.t0).toFixed(3)}s` : undefined,
+          animationTimingFunction: "cubic-bezier(.2,.7,.3,1)", animationFillMode: "both",
+        }}>{e.text}</span>
+      </div>
+    );
+  });
+  const tex = story?.texture;
+
   const accent = cap?.active || cap?.primary || "#FFE400";
   const src = mediaUrl(media.file);
   const onVideoError = () => {
@@ -492,16 +613,24 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
         <canvas ref={canvas} width={Math.round(W * dpr)} height={Math.round(H * dpr)} className="frame-canvas" />
         <video ref={vA} src={src} className="hidden-video" playsInline muted={muted} preload="auto" autoPlay={p.autoPlay}
           poster={clip.poster ? mediaUrl(clip.poster) : undefined}
-          onPlay={(e) => isCur(e) && setPlaying(true)} onPause={(e) => isCur(e) && setPlaying(false)}
+          onPlay={(e) => isCur(e) && setPlaying(true)} onPause={(e) => isCur(e) && !frozen.current?.run && setPlaying(false)}
           onError={onVideoError}
           onLoadedMetadata={(e) => { if (isCur(e)) seekAbsFor(Tref.current); }} />
         <video ref={vB} src={src} className="hidden-video" playsInline muted preload="auto"
-          onPlay={(e) => isCur(e) && setPlaying(true)} onPause={(e) => isCur(e) && setPlaying(false)}
+          onPlay={(e) => isCur(e) && setPlaying(true)} onPause={(e) => isCur(e) && !frozen.current?.run && setPlaying(false)}
           onLoadedMetadata={() => { prepped.current = -1; }} />
-        {VIGNETTE.has(gradeKey) && <div className="vignette" />}
+        {(VIGNETTE.has(gradeKey) || tex?.vignette) && <div className="vignette" />}
+        {story && <div className="story-vig" />}
+        {tex?.leak && <div className="story-leak" ref={leakEl} style={{ opacity: 0 }} />}
+        {tex && tex.grain > 0 && <div className="story-grain" style={{ opacity: Math.min(0.5, tex.grain * 0.32) }} />}
+        <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden>
+          <filter id={filterId} x="-10%" y="0" width="120%" height="100%"><feGaussianBlur ref={streakBlur} stdDeviation="0 0" /></filter>
+        </svg>
       </div>
       <div className="overlay">
+        {storyEl}
         {hookEl}{capEl}{ctaEl}
+        <div className="story-flash" ref={flashEl} style={{ opacity: 0 }} />
         {wm && <div className={`wm wm-${wmPos}`} style={{ fontSize: 40 * k * Math.min(1.6, Math.max(0.5, place.wm_scale ?? 1)) * emOf("Poppins"), lineHeight: `${40 * k * Math.min(1.6, Math.max(0.5, place.wm_scale ?? 1))}px` }}>{wm}</div>}
         {settings.progress_bar !== false && <div className="pbar" ref={pbarEl} style={{ background: accent, height: Math.max(2, 12 * k) }} />}
         <div className="intro" ref={introEl} style={{ opacity: 0 }} />

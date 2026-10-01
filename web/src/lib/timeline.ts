@@ -57,15 +57,30 @@ export function editedWords(c: Clip, edits: Edits): (Word & { i: number })[] {
   return out;
 }
 
+// filler sounds cut out with the pauses (pacing.FILLERS)
+const FILLERS = new Set(["um", "umm", "ummm", "uh", "uhh", "uhhh", "uhm", "erm", "hmm", "hmmm", "mmm"]);
+export const isFiller = (w: string) => FILLERS.has(w.toLowerCase().replace(/[^\p{L}\p{N}_']/gu, ""));
+
 function keepRanges(words: Word[], dur: number): [number, number][] {
   const maxPause = 0.45, lead = 0.12, tail = 0.15, startPad = 0.08, endPad = 0.35;
-  if (!words.length) return [[0, dur]];
+  const idx: number[] = [];
+  words.forEach((w, i) => { if (!isFiller(w.w)) idx.push(i); });
+  if (!idx.length) return [[0, dur]];
+  const real = idx.map((i) => words[i]);
   const ranges: [number, number][] = [];
-  let a = words[0].s > 0.4 ? Math.max(0, words[0].s - startPad) : 0;
-  let prevEnd = words[0].e;
-  for (const w of words.slice(1)) {
-    if (w.s - prevEnd > maxPause) { ranges.push([a, prevEnd + tail]); a = w.s - lead; }
+  let a = real[0].s > 0.4 ? Math.max(0, real[0].s - startPad) : 0;
+  let prevEnd = real[0].e;
+  let prevI = idx[0];
+  for (let k = 1; k < real.length; k++) {
+    const w = real[k];
+    const fill = idx[k] - prevI > 1;
+    const gap = w.s - prevEnd;
+    if (gap > maxPause || (fill && gap > 0.25)) {
+      ranges.push([a, prevEnd + Math.min(tail, fill ? gap / 3 : tail)]);
+      a = w.s - Math.min(lead, fill ? gap / 3 : lead);
+    }
     prevEnd = Math.max(prevEnd, w.e);
+    prevI = idx[k];
   }
   ranges.push([a, Math.min(dur, prevEnd + endPad)]);
   const out: [number, number][] = [];
@@ -98,6 +113,10 @@ export function buildTimeline(c: Clip, edits: Edits, removePauses = true): Timel
   const words: Timeline["words"] = [];
   const seen = new Set<string>();
   for (const w of ew) {
+    if (removePauses && isFiller(w.w)) {            // a cut-out "um" leaves the captions too
+      const mid = (w.s + w.e) / 2;
+      if (!segs.some((g) => mid >= g.a && mid <= g.b)) continue;
+    }
     for (const g of segs) {
       if (w.s >= g.a - 0.15 && w.s < g.b) {
         const key = `${w.i}@${g.t0}`;

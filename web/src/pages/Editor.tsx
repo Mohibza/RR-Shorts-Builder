@@ -4,6 +4,11 @@ import { setState, toast, useStore } from "../lib/store";
 import { absAt, baseParts, buildTimeline, fmt } from "../lib/timeline";
 import { playTime, usePlayTime } from "../lib/playtime";
 import type { FxPlan } from "../components/ClipPlayer";
+import { toFinal, toPre } from "../lib/fx";
+
+type Fr = { t: number; d: number }[];
+// the editor's bars and word list work in the cut timeline; the player runs in the finished timeline (+ freezes)
+const pre = (T: number, fr: Fr) => toPre(T, fr as any)[0];
 import type { Clip, Edits, Place, Project, Style } from "../lib/types";
 import { Icon } from "../components/Icon";
 import { ClipPlayer, type PlayerHandle } from "../components/ClipPlayer";
@@ -69,6 +74,8 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
 
   const style: Style = useMemo(() => ({ ...c.style, ...(edits.style || {}), place: edits.place ?? c.style.place ?? {} } as Style), [c.style, edits.style, edits.place]);
   const tl = useMemo(() => buildTimeline(c, edits, settings.remove_pauses !== false), [c, edits.trim, edits.cut, edits.fix, settings.remove_pauses]);
+  const fr: Fr = plan?.story?.freezes || [];
+  const seekPre = (t: number) => player.current?.seek(toFinal(t, fr as any));
   const task = Object.values(exports).filter((e) => e.project === p.id && e.clip === c.id).sort((a, b) => b.created - a.created)[0];
   const exporting = task && (task.state === "running" || task.state === "queued");
   const lastExport = task?.state === "done" ? { path: task.path, plan_file: task.plan_file } : c.exports[c.exports.length - 1];
@@ -120,16 +127,16 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
               onPlan={setPlan} fill withAudio />
             {frame && <div className="exact" onClick={() => setFrame("")}><img src={frame} alt="Exact frame" /><span className="chip dark"><Icon name="frame" size={13} /> Exact frame · click to go back to live</span></div>}
           </div>
-          <TrimBar c={c} edits={edits} tl={tl} plan={plan} onTrim={(tr) => change((e) => ({ ...e, trim: tr }))} onSeek={(t) => player.current?.seek(t)} />
+          <TrimBar c={c} edits={edits} tl={tl} plan={plan} onTrim={(tr) => change((e) => ({ ...e, trim: tr }))} onSeek={seekPre} fr={fr} />
         </div>
         <div className="ed-right glass depth">
           <div className="tabs">
             {TABS.map(([k, l, ic]) => <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}><Icon name={ic} size={16} />{l}</button>)}
           </div>
           <div className="tab-body scroll">
-            {tab === "transcript" && <TranscriptTab c={c} edits={edits} change={change} tl={tl} seek={(t) => player.current?.seek(t)} />}
+            {tab === "transcript" && <TranscriptTab c={c} edits={edits} change={change} tl={tl} seek={seekPre} fr={fr} />}
             {tab === "style" && <StyleTab style={style} change={change} />}
-            {tab === "vibe" && <VibeTab c={c} edits={edits} change={change} style={style} plan={plan} tl={tl} seek={(t) => player.current?.seek(t)} />}
+            {tab === "vibe" && <VibeTab c={c} edits={edits} change={change} style={style} plan={plan} tl={tl} seek={seekPre} fr={fr} />}
             {tab === "text" && <TextTab c={c} edits={edits} change={change} style={style} />}
             {tab === "audio" && <AudioTab edits={edits} change={change} plan={plan} />}
             {tab === "layout" && <LayoutTab style={style} change={change} landscape={p.info.width > p.info.height * 0.8} />}
@@ -143,7 +150,7 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
 }
 
 // ------------------------------------------------------------------ trim bar
-function TrimBar({ c, edits, tl, plan, onTrim, onSeek }: { c: Clip; edits: Edits; tl: ReturnType<typeof buildTimeline>; plan: FxPlan | null; onTrim: (t: [number, number]) => void; onSeek: (T: number) => void }) {
+function TrimBar({ c, edits, tl, plan, onTrim, onSeek, fr }: { c: Clip; edits: Edits; tl: ReturnType<typeof buildTimeline>; plan: FxPlan | null; onTrim: (t: [number, number]) => void; onSeek: (T: number) => void; fr: Fr }) {
   const parts = baseParts(c);
   const L = parts.reduce((x, [a, b]) => x + b - a, 0);
   const bar = useRef<HTMLDivElement>(null);
@@ -183,7 +190,7 @@ function TrimBar({ c, edits, tl, plan, onTrim, onSeek }: { c: Clip; edits: Edits
   const words = c.words || [];
   return (
     <div className="trim glass-2">
-      <div className="trim-top"><span><Icon name="scissors" size={14} /> Drag the ends to trim</span><span className="muted">Short: {fmt(tl.D)} · {tl.D.toFixed(1)}s</span>
+      <div className="trim-top"><span><Icon name="scissors" size={14} /> Drag the ends to trim</span><span className="muted">Short: {fmt(tl.D + fr.reduce((x, f) => x + f.d, 0))} · {(tl.D + fr.reduce((x, f) => x + f.d, 0)).toFixed(1)}s{fr.length ? ` (${fr.length} beat${fr.length > 1 ? "s" : ""})` : ""}</span>
         {edits.trim && <button className="linkbtn" onClick={() => onTrim([0, L])}>Reset</button>}</div>
       <div className="trim-bar" ref={bar} onMouseDown={(e) => { if ((e.target as HTMLElement).dataset.h) return; onSeek(TofAbs(absOf(x2t(e.clientX)))); }}>
         {words.map((w, i) => {
@@ -197,20 +204,21 @@ function TrimBar({ c, edits, tl, plan, onTrim, onSeek }: { c: Clip; edits: Edits
         <div className="trim-out" style={{ left: `${(tr[1] / L) * 100}%`, right: 0 }} />
         <div className="trim-h" data-h="1" style={{ left: `${(tr[0] / L) * 100}%` }} onMouseDown={() => setDrag(0)} />
         <div className="trim-h r" data-h="1" style={{ left: `${(tr[1] / L) * 100}%` }} onMouseDown={() => setDrag(1)} />
-        {(plan?.punches || []).map(([t], i) => <span key={"z" + i} className="zoom-mark" title={`Focus zoom at ${fmt(t)}`} style={{ left: `${(baseOf(absAt(tl, t)) / L) * 100}%` }} />)}
-        <Playhead tl={tl} L={L} baseOf={baseOf} />
+        {(plan?.punches || []).map(([t], i) => <span key={"z" + i} className="zoom-mark" title={`Focus zoom at ${fmt(t)}`} style={{ left: `${(baseOf(absAt(tl, pre(t, fr))) / L) * 100}%` }} />)}
+        {fr.map((f, i) => <span key={"b" + i} className="beat-mark" title={`Story beat (freeze ${f.d.toFixed(1)}s)`} style={{ left: `${(baseOf(absAt(tl, f.t)) / L) * 100}%` }} />)}
+        <Playhead tl={tl} L={L} baseOf={baseOf} fr={fr} />
       </div>
     </div>
   );
 }
 
-function Playhead({ tl, L, baseOf }: { tl: ReturnType<typeof buildTimeline>; L: number; baseOf: (abs: number) => number }) {
-  const t = usePlayTime((x) => Math.round(x * 30) / 30);
+function Playhead({ tl, L, baseOf, fr }: { tl: ReturnType<typeof buildTimeline>; L: number; baseOf: (abs: number) => number; fr: Fr }) {
+  const t = usePlayTime((x) => Math.round(pre(x, fr) * 30) / 30);
   return <div className="playhead" style={{ left: `${(baseOf(absAt(tl, t)) / L) * 100}%` }} />;
 }
 
 // ------------------------------------------------------------------ transcript: click to seek, select to remove
-function TranscriptTab({ c, edits, change, tl, seek }: { c: Clip; edits: Edits; change: (f: (e: Edits) => Edits) => void; tl: ReturnType<typeof buildTimeline>; seek: (T: number) => void }) {
+function TranscriptTab({ c, edits, change, tl, seek, fr }: { c: Clip; edits: Edits; change: (f: (e: Edits) => Edits) => void; tl: ReturnType<typeof buildTimeline>; seek: (T: number) => void; fr: Fr }) {
   const words = c.words || [];
   const cut = new Set(edits.cut || []);
   const fix = edits.fix || {};
@@ -219,7 +227,7 @@ function TranscriptTab({ c, edits, change, tl, seek }: { c: Clip; edits: Edits; 
   const [val, setVal] = useState("");
   const parts = baseParts(c);
   const inClip = (w: { s: number; e: number }) => parts.some(([a, b]) => w.s >= a - 0.05 && w.e <= b + 0.3);
-  const playing = usePlayTime((T) => tl.words.find((w) => T >= w.T && T < w.TE)?.i ?? -1);
+  const playing = usePlayTime((T0) => { const T = pre(T0, fr); return tl.words.find((w) => T >= w.T && T < w.TE)?.i ?? -1; });
   const Tof = (i: number) => tl.words.find((w) => w.i === i)?.T;
   const range = sel ? [Math.min(...sel), Math.max(...sel)] : null;
   const selIdx = range ? words.map((_, i) => i).filter((i) => i >= range[0] && i <= range[1]) : [];
@@ -474,16 +482,16 @@ function AudioTab({ edits, change, plan }: { edits: Edits; change: (f: (e: Edits
 }
 
 // ------------------------------------------------------------------ vibe, opening and focus zooms
-function VibeTab({ c, edits, change, style, plan, tl, seek }: { c: Clip; edits: Edits; change: (f: (e: Edits) => Edits) => void; style: Style; plan: FxPlan | null; tl: ReturnType<typeof buildTimeline>; seek: (t: number) => void }) {
+function VibeTab({ c, edits, change, style, plan, tl, seek, fr }: { c: Clip; edits: Edits; change: (f: (e: Edits) => Edits) => void; style: Style; plan: FxPlan | null; tl: ReturnType<typeof buildTimeline>; seek: (t: number) => void; fr: Fr }) {
   const cat = useStore((s) => s.catalog)!;
   const vibes = cat.vibes || {};
   const setStyle = (patch: Partial<Style>) => change((e) => ({ ...e, style: { ...(e.style || {}), ...patch } }));
   const detected = c.vibe && vibes[c.vibe] ? vibes[c.vibe].name : "";
   const custom = Array.isArray(edits.zooms);
-  const zoomsAbs: number[] = custom ? (edits.zooms as number[]) : (plan?.punches || []).map(([t]) => Math.round(absAt(tl, t) * 100) / 100);
+  const zoomsAbs: number[] = custom ? (edits.zooms as number[]) : (plan?.punches || []).map(([t]) => Math.round(absAt(tl, pre(t, fr)) * 100) / 100);
   const setZooms = (z: number[] | null) => change((e) => ({ ...e, zooms: z ? [...new Set(z.map((x) => Math.round(x * 100) / 100))].sort((a, b) => a - b) : undefined }));
   const TofAbs = (abs: number) => { for (const g of tl.segs) { if (abs < g.b) return g.t0 + Math.max(0, abs - g.a); } return tl.D; };
-  const addHere = () => setZooms([...zoomsAbs, absAt(tl, playTime())]);
+  const addHere = () => setZooms([...zoomsAbs, absAt(tl, pre(playTime(), fr))]);
   const opening = style.intro === "auto" ? plan?.intro : style.intro;
   return (
     <div className="vibe-tab">
@@ -493,6 +501,8 @@ function VibeTab({ c, edits, change, style, plan, tl, seek }: { c: Clip; edits: 
         <button className={`chipbtn ${!edits.vibe ? "on" : ""}`} onClick={() => change((e) => ({ ...e, vibe: undefined }))}><Icon name="spark" size={12} /> Auto{detected ? ` (${detected})` : ""}</button>
         {Object.entries(vibes).map(([k, v]) => <button key={k} className={`chipbtn ${edits.vibe === k ? "on" : ""}`} onClick={() => change((e) => ({ ...e, vibe: k }))}>{v.name}</button>)}
       </div>
+
+      <StorySection edits={edits} change={change} plan={plan} seek={seek} />
 
       <div className="sec-head"><h3>Opening (hook) effect</h3>{style.intro === "auto" && plan && <span className="muted small">now: {cat.intros[plan.intro] || plan.intro}</span>}</div>
       <div className="chips">
@@ -523,6 +533,41 @@ function VibeTab({ c, edits, change, style, plan, tl, seek }: { c: Clip; edits: 
       </div>
       <p className="muted small">Each zoom pushes in on the speaker's face, holds, then eases out, with a matching sound. The yellow marks on the timeline under the player show where they are.</p>
     </div>
+  );
+}
+
+// ------------------------------------------------------------------ Story FX: beats, editorial title, streaks, texture
+function StorySection({ edits, change, plan, seek }: { edits: Edits; change: (f: (e: Edits) => Edits) => void; plan: FxPlan | null; seek: (t: number) => void }) {
+  const settings = useStore((s) => s.settings);
+  const se = edits.story || {};
+  const val = <K extends keyof NonNullable<Edits["story"]>>(k: K, def: any) => (se[k] ?? def);
+  const level = String(val("level", settings.story_fx || "auto"));
+  const set = (patch: NonNullable<Edits["story"]>) => change((e) => ({ ...e, story: { ...(e.story || {}), ...patch } }));
+  const st = plan?.story;
+  const on = level !== "off";
+  const sw = (k: "pauses" | "titles" | "transitions" | "textures" | "behind", label: string, hint: string) => (
+    <Toggle on={!!val(k, settings[`story_${k}`] ?? true)} onChange={(v) => set({ [k]: v })} label={label} hint={hint} />
+  );
+  return (
+    <>
+      <div className="sec-head"><h3>Story FX</h3>
+        {st && st.level !== "off" && <span className="muted small">{st.freezes.length} beat{st.freezes.length === 1 ? "" : "s"}{st.title ? ` · ${st.title.look} title` : ""} · {st.streaks.length} streak{st.streaks.length === 1 ? "" : "s"}{st.texture ? " · film texture" : ""}</span>}</div>
+      <p className="muted small">Tells the clip like a pro edit: a dramatic pause before the payoff, a magazine-style title behind the speaker, motion-blur transitions and a film look.</p>
+      <Seg value={level as any} options={[["off", "Off"], ["auto", "Auto"], ["strong", "Strong"]]} onChange={(v) => set({ level: v })} />
+      {on && <div className="story-sw">
+        {sw("pauses", "Dramatic beats", "The picture freezes for a moment before the payoff line (and a “rewind” after a cold open), with a riser and a hit")}
+        {sw("titles", "Editorial title & beat text", "The hook becomes a magazine-style title; a short line lands during each beat. Replaces the hook banner.")}
+        {sw("behind", "Title behind the speaker", "On export the big word sits behind the person (automatic cut-out)")}
+        {sw("transitions", "Streak transitions", "Directional motion blur + whip zoom on every join and beat")}
+        {sw("textures", "Film texture", "Grain, soft glow, light leaks and vignette, matched to the vibe")}
+      </div>}
+      {on && st && st.freezes.length > 0 && <div className="zoom-list">
+        {st.spans.map(([a], i) => (
+          <span key={i} className="zoom-chip beat"><button className="linkbtn" onClick={() => seek(st.freezes[i].t - 1.2)} title="Play into this beat">beat {fmt(a)}</button></span>
+        ))}
+      </div>}
+      {on && st && st.freezes.length === 0 && st.level !== "off" && <p className="muted small">No natural payoff moment found for a beat in this clip. “Strong” looks harder.</p>}
+    </>
   );
 }
 

@@ -225,7 +225,14 @@ class Settings:
     cookies_browser: str = ""        # e.g. chrome, edge, firefox (for yt-dlp)
 
     extra: dict = field(default_factory=dict)
-    settings_version: int = 5
+    # Story FX (story.py): dramatic beats, editorial titles, streak transitions, film texture
+    story_fx: str = "auto"           # off | auto | strong
+    story_pauses: bool = True        # freeze-frame beats before the payoff (+ "rewind" after a cold open)
+    story_titles: bool = True        # the hook as an editorial title, beat text during freezes
+    story_transitions: bool = True   # motion-blur streaks + whip zoom on joins and beats
+    story_textures: bool = True      # grain, bloom, light leaks, vignette
+    story_behind: bool = True        # put the big title behind the speaker (person cut-out)
+    settings_version: int = 6
 
     @classmethod
     def load(cls) -> "Settings":
@@ -254,7 +261,9 @@ class Settings:
                         s.motion = "auto"
                     if s.intro in ("random", "shake", "flash"):
                         s.intro = "auto"
-                s.settings_version = 5
+                if ver < 6:  # v2.4: Story FX on for everyone
+                    s.story_fx = "auto"
+                s.settings_version = 6
             except Exception:
                 pass
         return s

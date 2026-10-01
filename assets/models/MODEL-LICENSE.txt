@@ -1,0 +1,3 @@
+u2netp.onnx - U2-Net (small) salient object segmentation model.
+Authors: Xuebin Qin et al. (https://github.com/xuebinqin/U-2-Net); ONNX export from rembg (https://github.com/danielgatis/rembg).
+Licensed under the Apache License 2.0. Used only to cut the speaker out for the Story FX title-behind-speaker effect.
