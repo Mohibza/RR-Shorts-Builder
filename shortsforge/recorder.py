@@ -13,8 +13,8 @@ How it stays safe and light:
   most compatible one (GDI capture + software encoder). The path that works is remembered in the session.
 * The microphone goes into the same FFmpeg process (always in sync). System sound is recorded separately as WAV
   through WASAPI loopback (optional component: "soundcard").
-* Mouse position, clicks, wheel and "a key was pressed" moments are logged with their time (never which key), so
-  the editor can zoom to where the action is.
+* Mouse position, clicks and "a key was pressed" moments are logged with their time (never which key), so the
+  editor can zoom to where the action is. This is done by looking at the state 60 times a second, without hooks.
 
 Only the standard library (+ ctypes on Windows) is imported here on purpose: this process must start instantly and
 use almost no memory.
@@ -33,6 +33,7 @@ from typing import Optional
 
 IS_WIN = os.name == "nt"
 NO_WINDOW = 0x08000000 if IS_WIN else 0
+HIGH_PRIO = 0x00008000 if IS_WIN else 0        # the capture gets processor time before the program being shown
 DEFAULT_HOTKEYS = {"stop": "ctrl+s", "pause": "ctrl+p", "resume": "ctrl+r", "marker": "ctrl+m",
                    "cancel": "ctrl+shift+alt+x"}
 EMERGENCY_STOP = "ctrl+shift+alt+f12"      # always registered too, in case the user's stop key is taken
@@ -121,15 +122,19 @@ def _even(v: float) -> int:
 
 
 def _enc_args(enc: str, quality: str, fps: int) -> list[str]:
-    q = {"high": 18, "medium": 22, "small": 26}.get(quality, 20)
+    """Encoder settings for LIVE capture: the encoder must never fall behind the screen, so speed comes first
+    (the editor re-encodes on export anyway)."""
+    q = {"high": 19, "medium": 23, "small": 27}.get(quality, 21)
     g = ["-g", str(fps * 2)]
     if enc == "h264_nvenc":
-        return ["-c:v", enc, "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", str(q), "-b:v", "0"] + g
+        return ["-c:v", enc, "-preset", "p2", "-tune", "ll", "-rc", "constqp", "-qp", str(q), "-bf", "0"] + g
     if enc == "h264_amf":
-        return ["-c:v", enc, "-quality", "balanced", "-rc", "cqp", "-qp_i", str(q), "-qp_p", str(q + 2)] + g
+        return ["-c:v", enc, "-usage", "lowlatency", "-quality", "speed", "-rc", "cqp", "-qp_i", str(q),
+                "-qp_p", str(q + 2), "-bf", "0"] + g
     if enc == "h264_qsv":
-        return ["-c:v", enc, "-global_quality", str(q), "-preset", "faster"] + g
-    return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", str(q), "-pix_fmt", "yuv420p"] + g
+        return ["-c:v", enc, "-global_quality", str(q), "-preset", "veryfast", "-look_ahead", "0", "-bf", "0",
+                "-async_depth", "4"] + g
+    return ["-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", str(q), "-pix_fmt", "yuv420p"] + g
 
 
 def capture_attempts(cfg: dict) -> list[dict]:
@@ -138,6 +143,9 @@ def capture_attempts(cfg: dict) -> list[dict]:
     fps = int(cfg.get("fps") or 30)
     quality = cfg.get("quality") or "high"
     enc = cfg.get("encoder") or "libx264"
+    if cfg.get("attempt") and not cfg.get("test_source"):     # the method the speed test picked, then the rest
+        rest = capture_attempts({**cfg, "attempt": None})
+        return [cfg["attempt"]] + [a for a in rest if a["name"] != cfg["attempt"].get("name")]
     if cfg.get("test_source"):                      # development / self-test (no real screen)
         return [{"name": "test", "input": ["-f", "lavfi", "-i", f"testsrc2=s=1280x720:r={fps}"], "vf": None,
                  "enc": _enc_args("libx264", quality, fps)}]
@@ -148,7 +156,7 @@ def capture_attempts(cfg: dict) -> list[dict]:
         rect = src["region"]
     rect = {"x": int(rect["x"]), "y": int(rect["y"]), "w": _even(rect["w"]), "h": _even(rect["h"])}
     cursor = 1 if cfg.get("cursor", True) else 0
-    gdi = ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", str(cursor)]
+    gdi = ["-rtbufsize", "512M", "-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", str(cursor)]
     out: list[dict] = []
     if kind == "window" and src.get("title"):
         out.append({"name": "window", "input": gdi + ["-i", f"title={src['title']}"],
@@ -158,16 +166,26 @@ def capture_attempts(cfg: dict) -> list[dict]:
         return out
     method = cfg.get("method") or "auto"
     single = int(cfg.get("monitors") or 1) <= 1
-    if method == "auto" and mon.get("primary", True) and single:
+    if method == "auto" and (single or mon.get("dxgi") is not None):
         # desktop duplication: by far the lightest way to grab the screen on Windows 10/11
-        dd = f"ddagrab=output_idx=0:framerate={fps}:draw_mouse={cursor}"
+        dd = f"ddagrab=output_idx={int(mon.get('dxgi') or 0)}:framerate={fps}:draw_mouse={cursor}"
         if kind == "region":
             dd += f":offset_x={rect['x'] - int(mon['x'])}:offset_y={rect['y'] - int(mon['y'])}:video_size={rect['w']}x{rect['h']}"
+        # 1. everything stays on the graphics card: capture -> encoder, no copy through the processor
         if enc in ("h264_nvenc", "h264_amf"):
             out.append({"name": f"gpu ({enc})", "input": ["-f", "lavfi", "-i", dd], "vf": None,
                         "enc": _enc_args(enc, quality, fps)})
+        if enc == "h264_qsv":
+            out.append({"name": "gpu (h264_qsv)", "vf": None, "enc": _enc_args(enc, quality, fps),
+                        "input": ["-f", "lavfi", "-i", dd + ",hwmap=derive_device=qsv,format=qsv,vpp_qsv=format=nv12"]})
+            out.append({"name": "gpu (h264_qsv, direct)", "vf": None, "enc": _enc_args(enc, quality, fps),
+                        "input": ["-f", "lavfi", "-i", dd + ",hwmap=derive_device=qsv,format=qsv"]})
+        # 2. capture on the card, picture copied through the processor (heavier)
+        if enc == "h264_qsv":
+            out.append({"name": "duplication + h264_qsv", "vf": None, "enc": _enc_args(enc, quality, fps),
+                        "input": ["-f", "lavfi", "-i", dd + ",hwdownload,format=bgra"]})
         out.append({"name": "duplication + software", "input": ["-f", "lavfi", "-i", dd + ",hwdownload,format=bgra"],
-                    "vf": None, "enc": _enc_args(enc if enc == "h264_qsv" else "libx264", quality, fps)})
+                    "vf": None, "enc": _enc_args("libx264", quality, fps)})
     if kind == "screen" and single:        # the whole (only) screen: let the capture find its own size
         g = gdi + ["-i", "desktop"]
     else:
@@ -267,13 +285,15 @@ def system_audio_available() -> bool:
 
 # ================================================================ mouse / key activity log (Windows)
 class Events:
-    """Appends {t, k, x, y} lines. t = seconds on the recording's own clock (pauses don't count)."""
+    """Appends {w, s, k, x, y} lines: w = wall-clock time, s = segment number. `finalize()` turns them into exact
+    video times once the length of each segment is known."""
 
     def __init__(self, path: Path, rect: dict):
         self.f = open(path, "a", encoding="utf-8", buffering=1)
         self.rect = rect
         self.base = 0.0           # recorded seconds before the current segment
         self.t0: Optional[float] = None
+        self.seg = 0
         self.lock = threading.Lock()
         self.last_key = 0.0
 
@@ -281,10 +301,9 @@ class Events:
         return None if self.t0 is None else self.base + (time.time() - self.t0)
 
     def add(self, kind: str, x: Optional[float] = None, y: Optional[float] = None, **extra) -> None:
-        t = self.now()
-        if t is None:
+        if self.t0 is None:
             return
-        rec = {"t": round(t, 3), "k": kind, **extra}
+        rec = {"w": round(time.time(), 3), "s": self.seg, "k": kind, **extra}
         if x is not None and y is not None:
             r = self.rect
             rec["x"] = round((x - r["x"]) / max(1, r["w"]), 4)
@@ -343,7 +362,7 @@ class Recorder:
         _log(self.sdir, "start: " + " ".join(cmd))
         try:
             p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                 stderr=open(self.sdir / "ffmpeg.log", "ab"), creationflags=NO_WINDOW)
+                                 stderr=open(self.sdir / "ffmpeg.log", "ab"), creationflags=NO_WINDOW | HIGH_PRIO)
         except OSError as e:
             _log(self.sdir, f"couldn't start ffmpeg: {e}")
             return None
@@ -389,6 +408,7 @@ class Recorder:
             self.sys.start()
             seg["sys"] = f"sys_{idx:03d}.wav"
         self.events.base = self.recorded
+        self.events.seg = idx
         self.events.t0 = self.seg_t0
         self.state["segments"].append(seg)
         self.state["state"] = "recording"
@@ -539,6 +559,48 @@ def _probe(ffmpeg: str, path: Path) -> dict:
     return out
 
 
+def _sync_events(sdir: Path, ffmpeg: str, segs: list, st: dict) -> None:
+    """Give every logged click / key / cursor position its exact time in the finished video. The recorder only
+    knows wall-clock times; a segment's first frame is (the moment it was stopped) - (its length)."""
+    raw, done = sdir / "events.jsonl", sdir / "events.synced"
+    if done.exists() or not raw.exists():
+        return
+    starts, offs, total = [], [], 0.0
+    for sg in segs:
+        f = sdir / sg["video"]
+        d = _probe(ffmpeg, f)["duration"] if f.exists() else 0.0
+        end = sg.get("end")
+        starts.append((end - d) if end and d else (float(sg.get("start") or 0) - 1.4))
+        offs.append(total)
+        total += d
+    if not starts:
+        return
+    out, marks = [], []
+    try:
+        for line in raw.read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if "w" not in e:                       # written by an older version: already has t
+                out.append(line)
+                continue
+            i = min(int(e.get("s") or 0), len(starts) - 1)
+            t = offs[i] + (e["w"] - starts[i])
+            if t < 0:
+                continue
+            rec = {"t": round(t, 3), **{k: v for k, v in e.items() if k not in ("w", "s")}}
+            if rec["k"] == "marker":
+                marks.append(round(t, 2))
+            out.append(json.dumps(rec))
+        raw.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
+        done.write_text("1", encoding="utf-8")
+        if marks:
+            st["markers"] = marks
+    except OSError:
+        pass
+
+
 def finalize(sdir: Path) -> dict:
     """Stitch the segments of a session (finished or interrupted) and write session.json. Safe to call again."""
     cfg = _read(sdir / "config.json", {}) or {}
@@ -547,6 +609,7 @@ def finalize(sdir: Path) -> dict:
     segs = st.get("segments") or []
     if not segs:           # crashed before the state was written: use whatever files are there
         segs = [{"video": f.name, "sys": "", "cam": ""} for f in sorted(sdir.glob("seg_*.mkv"))]
+    _sync_events(sdir, ffmpeg, segs, st)
     mkv, video = sdir / "screen.mkv", sdir / "screen.mp4"
     have = video.exists() and video.stat().st_size > 2000 and not mkv.exists()
     if not have:
@@ -566,7 +629,8 @@ def finalize(sdir: Path) -> dict:
             "state": "done" if have else "failed", "notes": list(st.get("notes") or []), "markers": st.get("markers") or [],
             "method": st.get("method") or "", "seen": False, "video": "", "system": "", "webcam": "", "events": "",
             "poster": "", "duration": 0.0, "width": 0, "height": 0, "fps": int(cfg.get("fps") or 30), "mic": False,
-            "recovered": st.get("state") in ("recording", "paused", "starting")}
+            "recovered": st.get("state") in ("recording", "paused", "starting"),
+            "events_synced": (sdir / "events.synced").exists()}
     if st.get("state") == "failed" and not have:
         meta["recovered"] = False
     if st.get("state") == "cancelled":
@@ -634,70 +698,41 @@ def _win_loop(rec: Recorder) -> None:
         rec.note("These shortcut keys couldn't be used (another program has them): " + ", ".join(failed)
                  + f". Emergency stop: {EMERGENCY_STOP.upper()}.")
 
-    # low-level hooks: where the mouse clicks, when the wheel turns, when a key is pressed (never which key)
-    LRESULT = ctypes.c_ssize_t
-    HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-
-    class MSLL(ctypes.Structure):
-        _fields_ = [("pt", wintypes.POINT), ("mouseData", wintypes.DWORD), ("flags", wintypes.DWORD),
-                    ("time", wintypes.DWORD), ("dwExtraInfo", ctypes.c_void_p)]
-    user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
-    user32.CallNextHookEx.restype = LRESULT
-    user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, ctypes.c_void_p, wintypes.DWORD]
-    user32.SetWindowsHookExW.restype = ctypes.c_void_p
+    # Where the mouse is, when it clicks, when a key goes down (never which key). This only LOOKS at the state
+    # 60 times a second - no system hooks, so it can never slow the mouse or keyboard down.
     ev = rec.events
+    stop_ev = threading.Event()
+    user32.GetAsyncKeyState.restype = ctypes.c_short
+    KEYS = [0x08, 0x09, 0x0D, 0x20, 0x2E] + list(range(0x30, 0x3A)) + list(range(0x41, 0x5B)) + list(range(0xBA, 0xC1)) \
+        + list(range(0xDB, 0xDF))
 
-    def mouse_proc(n, w, l):
-        if n >= 0:
+    def sampler():
+        pt, last = wintypes.POINT(), (None, None)
+        btn = {0x01: False, 0x02: False, 0x04: False}
+        keys_down, n = False, 0
+        while not stop_ev.is_set():
+            n += 1
             try:
-                if w in (0x201, 0x204, 0x207):                     # left / right / middle button down
-                    m = ctypes.cast(l, ctypes.POINTER(MSLL)).contents
-                    ev.add("click", m.pt.x, m.pt.y, b={0x201: "l", 0x204: "r", 0x207: "m"}[w])
-                elif w == 0x20A:
-                    m = ctypes.cast(l, ctypes.POINTER(MSLL)).contents
-                    ev.add("wheel", m.pt.x, m.pt.y)
+                if user32.GetCursorPos(ctypes.byref(pt)):
+                    for vk, name in ((0x01, "l"), (0x02, "r"), (0x04, "m")):
+                        down = bool(user32.GetAsyncKeyState(vk) & 0x8000)
+                        if down and not btn[vk]:
+                            ev.add("click", pt.x, pt.y, b=name)
+                        btn[vk] = down
+                    if (pt.x, pt.y) != last and n % 2 == 0:
+                        last = (pt.x, pt.y)
+                        ev.add("move", pt.x, pt.y)
+                if n % 2:
+                    any_down = any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in KEYS)
+                    if any_down and not keys_down and time.time() - ev.last_key > 0.1:
+                        ev.last_key = time.time()
+                        ev.add("key")
+                    keys_down = any_down
             except Exception:
                 pass
-        return user32.CallNextHookEx(None, n, w, l)
-
-    def key_proc(n, w, l):
-        if n >= 0 and w in (0x100, 0x104):
-            now = time.time()
-            if now - ev.last_key > 0.12:                           # typing activity only, a few marks a second
-                ev.last_key = now
-                ev.add("key")
-        return user32.CallNextHookEx(None, n, w, l)
-    mp, kp = HOOKPROC(mouse_proc), HOOKPROC(key_proc)
-    kernel32.GetModuleHandleW.restype = ctypes.c_void_p
-    stop_ev = threading.Event()
-    hook_tid = [0]
-
-    def hook_thread():
-        # Its own thread with its own message pump: low-level hooks must answer within milliseconds, and the main
-        # thread is busy for seconds while a segment starts or stops (that would make the mouse stutter).
-        hook_tid[0] = kernel32.GetCurrentThreadId()
-        hmod = kernel32.GetModuleHandleW(None)
-        hs = [user32.SetWindowsHookExW(14, mp, hmod, 0), user32.SetWindowsHookExW(13, kp, hmod, 0)]
-        if not all(hs):
-            _log(rec.sdir, "input tracking unavailable (hooks refused)")
-        m = wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(m), None, 0, 0) > 0:
-            user32.TranslateMessage(ctypes.byref(m))
-            user32.DispatchMessageW(ctypes.byref(m))
-        for h in hs:
-            if h:
-                user32.UnhookWindowsHookEx(ctypes.c_void_p(h))
-
-    def cursor_sampler():
-        pt, last = wintypes.POINT(), (None, None)
-        while not stop_ev.is_set():
-            if user32.GetCursorPos(ctypes.byref(pt)) and (pt.x, pt.y) != last:
-                last = (pt.x, pt.y)
-                ev.add("move", pt.x, pt.y)
-            time.sleep(1 / 30)
+            time.sleep(1 / 60)
     if rec.cfg.get("track_input", True):
-        threading.Thread(target=hook_thread, daemon=True).start()
-        threading.Thread(target=cursor_sampler, daemon=True).start()
+        threading.Thread(target=sampler, daemon=True).start()
 
     msg = wintypes.MSG()
     last_check = 0.0
@@ -715,8 +750,6 @@ def _win_loop(rec: Recorder) -> None:
             time.sleep(0.01)
     finally:
         stop_ev.set()
-        if hook_tid[0]:
-            user32.PostThreadMessageW(hook_tid[0], 0x0012, 0, 0)      # WM_QUIT: the hook thread unhooks and ends
         for i in actions:
             user32.UnregisterHotKey(None, i)
 

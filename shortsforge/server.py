@@ -680,10 +680,8 @@ def _make_handler(app: App):
         from . import recorder
         return recorder.hotkey_problems({**recorder.DEFAULT_HOTKEYS, **(a.get("hotkeys") or {})})
 
-    def rec_start(a):
+    def _rec_cfg(a):
         from . import recsetup
-        if E.busy():
-            raise ApiError("Clips are still being made. Wait for them to finish (or cancel them), then record.")
         s = Settings.load()
         mons = recsetup.monitors()
         src = dict(s.rec_source or {})
@@ -705,6 +703,22 @@ def _make_handler(app: App):
                "system_audio": bool(s.rec_system_audio) and recsetup.recorder.system_audio_available(),
                "webcam": s.rec_webcam or "", "cursor": bool(s.rec_cursor), "track_input": bool(s.rec_track_input),
                "method": s.rec_method, "hotkeys": dict(s.rec_hotkeys or {}), "name": str(a.get("name") or "")[:80]}
+        return cfg
+
+    def rec_prepare(a):
+        """Find the smoothest capture method for this PC (a few seconds, remembered afterwards)."""
+        from . import recsetup
+        r = recsetup.prepare(_rec_cfg(a), bool(a.get("retest")))
+        return {"fps": r["fps"], "measured": r["measured"], "note": r["note"], "tried": r.get("tried", []),
+                "method": (r.get("attempt") or {}).get("name", "")}
+
+    def rec_start(a):
+        from . import recsetup
+        if E.busy():
+            raise ApiError("Clips are still being made. Wait for them to finish (or cancel them), then record.")
+        cfg = _rec_cfg(a)
+        pr = recsetup.prepare(cfg)
+        cfg["attempt"], cfg["fps"] = pr.get("attempt"), pr.get("fps") or cfg["fps"]
         try:
             res = recsetup.start(cfg)
         except ValueError as e:
@@ -792,7 +806,7 @@ def _make_handler(app: App):
         old = _edit_project(new["id"])
         have = {m["id"] for m in new.get("media", [])}
         new["media"] = list(new.get("media", [])) + [m for m in old.get("media", []) if m["id"] not in have]
-        for k in ("created", "recording", "events", "markers"):
+        for k in ("created", "recording", "events", "markers", "cursor", "captions", "chapters", "auto"):
             if k in old and k not in new:
                 new[k] = old[k]
         veditor.save(new)
@@ -831,6 +845,58 @@ def _make_handler(app: App):
                 continue
             out[m["id"]] = veditor.assets(m, E.bus.emit)
         return out
+
+    AUTO: dict = {}
+
+    def edit_auto(a):
+        """Start Auto Edit on the saved project (runs in the background; progress arrives as 'edit' events)."""
+        from . import autoedit
+        pid = str(a["id"])
+        p = _edit_project(pid)
+        job = AUTO[pid] = {"id": pid, "state": "running", "stage": "Starting", "frac": 0.0, "error": "", "summary": None,
+                           "project": None, "cancel": threading.Event()}
+
+        def tell():
+            E.bus.emit("edit", {"type": "auto", **{k: job[k] for k in ("id", "state", "stage", "frac", "error", "summary")}})
+
+        def prog(stage, frac):
+            job["stage"], job["frac"] = stage, frac
+            tell()
+
+        def work():
+            try:
+                q, summary = autoedit.run(p, a.get("opts") or {}, prog, job["cancel"], Settings.load())
+                job.update(state="done", project=q, summary=summary, frac=1.0)
+            except Exception as e:
+                if type(e).__name__ == "Cancelled":
+                    job.update(state="cancelled")
+                else:
+                    traceback.print_exc()
+                    job.update(state="failed", error=(str(e).split("\n")[0] or type(e).__name__)[:300])
+            tell()
+        threading.Thread(target=work, daemon=True).start()
+        return {"state": "running"}
+
+    def edit_auto_get(a):
+        job = AUTO.get(str(a["id"]))
+        if not job:
+            return {"state": "none"}
+        return {k: job[k] for k in ("id", "state", "stage", "frac", "error", "summary", "project")}
+
+    def edit_auto_cancel(a):
+        job = AUTO.get(str(a["id"]))
+        if job:
+            job["cancel"].set()
+        return True
+
+    def edit_events(a):
+        """Clicks and cursor path of a recording, for the click ripples in the preview."""
+        from . import vfx
+        p = _edit_project(a["id"])
+        cur = p.get("cursor") or {}
+        if not cur.get("events"):
+            return {"clicks": [], "moves": [], "keys": []}
+        return vfx.load_events(cur["events"], float(cur.get("offset") or 0))
 
     def edit_export(a):
         from . import veditor
@@ -1441,6 +1507,7 @@ def _make_handler(app: App):
         ("GET", "/api/record/devices"): rec_devices,
         ("POST", "/api/record/region"): rec_region,
         ("POST", "/api/record/keys"): rec_check_keys,
+        ("POST", "/api/record/prepare"): rec_prepare,
         ("POST", "/api/record/start"): rec_start,
         ("POST", "/api/record/control"): rec_control,
         ("GET", "/api/record/sessions"): rec_sessions,
@@ -1454,6 +1521,10 @@ def _make_handler(app: App):
         ("POST", "/api/edit/delete"): edit_delete,
         ("POST", "/api/edit/import"): edit_import,
         ("GET", "/api/edit/assets"): edit_assets,
+        ("POST", "/api/edit/auto"): edit_auto,
+        ("GET", "/api/edit/auto"): edit_auto_get,
+        ("POST", "/api/edit/auto/cancel"): edit_auto_cancel,
+        ("GET", "/api/edit/events"): edit_events,
         ("POST", "/api/edit/export"): edit_export,
         ("POST", "/api/edit/export/cancel"): edit_export_cancel,
         ("GET", "/api/edit/exports"): edit_exports,

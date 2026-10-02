@@ -35,7 +35,7 @@ def monitors() -> list[dict]:
 
     class MI(ctypes.Structure):
         _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
-                    ("dwFlags", wintypes.DWORD)]
+                    ("dwFlags", wintypes.DWORD), ("szDevice", ctypes.c_wchar * 32)]
     PROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(wintypes.RECT),
                               ctypes.c_void_p)
 
@@ -45,12 +45,15 @@ def monitors() -> list[dict]:
         if ctypes.windll.user32.GetMonitorInfoW(ctypes.c_void_p(hmon), ctypes.byref(mi)):
             r = mi.rcMonitor
             out.append({"x": r.left, "y": r.top, "w": r.right - r.left, "h": r.bottom - r.top,
-                        "primary": bool(mi.dwFlags & 1)})
+                        "primary": bool(mi.dwFlags & 1), "device": mi.szDevice})
         return 1
     try:
         ctypes.windll.user32.EnumDisplayMonitors(None, None, PROC(cb), 0)
     except Exception:
         pass
+    # the graphics card numbers its outputs in display order (\\.\DISPLAY1, 2, ...): needed for fast capture
+    for i, m in enumerate(sorted(out, key=lambda m: [int(c) for c in re.findall(r"\d+", m["device"])] or [0])):
+        m["dxgi"] = i
     out.sort(key=lambda m: (not m["primary"], m["x"], m["y"]))
     for i, m in enumerate(out):
         m["idx"] = i
@@ -166,6 +169,110 @@ if ($script:r -and $script:r.Width -gt 40 -and $script:r.Height -gt 40) {
         return None
     x, y, w, h = (int(v) for v in m.groups())
     return {"x": x, "y": y, "w": w // 2 * 2, "h": h // 2 * 2}
+
+
+# ------------------------------------------------------------------ speed test: which capture method is smooth here?
+CACHE_FILE = data_dir() / "capture_test.json"
+
+
+def _bench(ffmpeg: str, attempt: dict, cfg: dict, seconds: float = 3.0) -> float:
+    """Frames per second this method really delivers (0 = it doesn't work on this PC)."""
+    cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-progress", "pipe:1", "-nostats",
+           *attempt["input"]]
+    if attempt.get("vf"):
+        cmd += ["-vf", attempt["vf"]]
+    tmp = data_dir() / "capture_test.mkv"
+    cmd += [*attempt["enc"], "-t", f"{seconds:.1f}", "-f", "matroska", str(tmp)]
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                             creationflags=NO_WINDOW)
+    except OSError:
+        return 0.0
+    pts: list[tuple[float, int]] = []
+    t_end = time.time() + seconds + 12
+    try:
+        for line in p.stdout:                       # type: ignore[union-attr]
+            if line.startswith("frame="):
+                try:
+                    pts.append((time.time(), int(line.split("=", 1)[1])))
+                except ValueError:
+                    pass
+            if time.time() > t_end:
+                p.kill()
+                break
+        p.wait(timeout=10)
+    except Exception:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    if p.returncode != 0 or len(pts) < 3:
+        return 0.0
+    pts = [x for x in pts if x[1] > 0]
+    if len(pts) < 3 or pts[-1][0] - pts[0][0] < 0.6:
+        return 0.0
+    a = pts[min(1, len(pts) - 2)]                   # skip the start-up moment
+    rate = (pts[-1][1] - a[1]) / max(0.2, pts[-1][0] - a[0])
+    try:                                            # the picture must be real, not a black or broken frame
+        import cv2
+        cap = cv2.VideoCapture(str(tmp))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, 20)
+        ok, fr = cap.read()
+        cap.release()
+        if not ok or fr is None or float(fr.std()) < 1.0:
+            rate = 0.0
+    except Exception:
+        pass
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return rate
+
+
+def prepare(cfg: dict, force: bool = False) -> dict:
+    """Try the capture methods for a few seconds each and keep the first one that holds the frame rate (or the
+    fastest). Remembered, so it only happens once per setup. Returns {attempt, fps, measured, note}."""
+    fps = int(cfg.get("fps") or 30)
+    src = cfg.get("source") or {}
+    if not IS_WIN or src.get("kind") == "window" or cfg.get("test_source"):
+        return {"attempt": None, "fps": fps, "measured": 0, "note": ""}
+    ffmpeg = find_ffmpeg()
+    from .utils import pick_encoder
+    try:
+        enc = pick_encoder("auto")
+    except Exception:
+        enc = "libx264"
+    full = {**cfg, "encoder": enc}
+    key = json.dumps([ffmpeg, enc, fps, cfg.get("quality"), src, cfg.get("cursor"), cfg.get("method"),
+                      cfg.get("monitors")], sort_keys=True)
+    cache = recorder._read(CACHE_FILE, {}) or {}
+    if not force and key in cache:
+        return cache[key]
+    results = []
+    for a in recorder.capture_attempts(full):
+        got = _bench(ffmpeg, a, full)
+        results.append((got, a))
+        if got >= fps * 0.95:
+            break
+    best = max(results, key=lambda r: r[0]) if results else (0.0, None)
+    out = {"attempt": best[1] if best[0] > 0 else None, "fps": fps, "measured": round(best[0], 1), "note": "",
+           "tried": [{"name": a["name"], "fps": round(g, 1)} for g, a in results]}
+    if best[0] > 0 and fps > 30 and best[0] < fps * 0.9:
+        # 60 fps isn't reachable on this PC: a steady 30 looks far smoother than a stuttering 60
+        low = prepare({**cfg, "fps": 30}, force)
+        low["note"] = (f"This PC reached only {best[0]:.0f} of {fps} frames a second, so the recording uses a "
+                       "steady 30 fps instead (smoother than a stuttering 60).")
+        out = low
+    elif best[0] > 0 and best[0] < fps * 0.9:
+        out["note"] = (f"This PC reaches about {best[0]:.0f} frames a second while capturing. Close heavy programs "
+                       "or pick a smaller region for a smoother recording.")
+    cache[key] = out
+    try:
+        recorder._write(CACHE_FILE, cache)
+    except OSError:
+        pass
+    return out
 
 
 # ------------------------------------------------------------------ start

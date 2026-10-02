@@ -2,7 +2,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, get, mediaUrl } from "../lib/api";
 import { go, setState, toast, useStore } from "../lib/store";
-import { Assets, clamp, cmd, Cmd, EExport, EProject, getClock, Item, itemBox, itemDur, itemEnd, Media, onCmd, projDur, r3, removeItems, setClock, settle, splitAt, tc, uid } from "../lib/edit";
+import { Assets, clamp, cmd, Cmd, EExport, El, elEnd, EProject, Events, getClock, Item, itemBox, itemDur, itemEnd, Media, onCmd, projDur, r3, removeItems, rippleEls, setClock, settle, splitAt, tc, uid } from "../lib/edit";
+import { AutoJob, ElProps, LeftPanel, Num } from "../components/edit/Panels";
 import { Icon } from "../components/Icon";
 import { Btn, Field, IconBtn, Modal, Progress, Seg, Select, Slider, Toggle, timeAgo } from "../components/ui";
 import { Stage } from "../components/edit/Stage";
@@ -82,12 +83,14 @@ function Workspace({ pid }: { pid: string }) {
   const [pps, setPpsRaw] = useState(40);
   const [snap, setSnap] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [events, setEvents] = useState<Events | null>(null);
+  const [auto, setAuto] = useState<AutoJob | null>(null);
   const [tlH, setTlH] = useState(() => { try { return Number(localStorage.getItem("rr_tlh")) || 0; } catch { return 0; } });
   const [, force] = useState(0);
   const undo = useRef<EProject[]>([]), redo = useRef<EProject[]>([]);
   const pRef = useRef<EProject | null>(null); pRef.current = p;
   const selRef = useRef(sel); selRef.current = sel;
-  const clip = useRef<Item[]>([]);
+  const clip = useRef<{ items: Item[]; els: El[] }>({ items: [], els: [] });
   const lastTag = useRef({ tag: "", at: 0 });
   const dirty = useRef(false), saveTimer = useRef<any>(null), tlBox = useRef<HTMLDivElement>(null);
   const setPps = (v: number) => setPpsRaw(clamp(v, 0.5, 600));
@@ -114,7 +117,23 @@ function Workspace({ pid }: { pid: string }) {
     setClock({ t: 0, playing: false });
     get<EProject>("/api/edit/project", { id: pid }).then((q) => { setP(q); setState({ editName: q.name, editDirty: false }); loadAssets(); })
       .catch((e) => setErr(e.message));
-    const onEdit = (e: Event) => { if ((e as CustomEvent).detail?.type === "media") loadAssets(); };
+    const loadEvents = () => get<Events>("/api/edit/events", { id: pid }).then(setEvents).catch(() => {});
+    loadEvents();
+    const onEdit = (e: Event) => {
+      const d = (e as CustomEvent).detail;
+      if (d?.type === "media") loadAssets();
+      if (d?.type === "auto" && d.id === pid) {
+        setAuto(d);
+        if (d.state === "done") get<{ project: EProject; summary: Record<string, any> }>("/api/edit/auto", { id: pid }).then((r) => {
+          if (!r.project) return;
+          begin(); setP(r.project); setSel([]); touch(); setClock({ t: 0, playing: false });
+          const sm = r.summary || {};
+          toast(`Auto Edit finished: ${sm.cuts || 0} cuts, ${sm.zooms || 0} zooms, ${sm.captions || 0} captions, ${Math.round(sm.saved || 0)} s shorter. Ctrl+Z undoes it.`, "ok");
+          setTimeout(fit, 80);
+        }).catch((er) => toast(er.message, "error"));
+        if (d.state === "failed") toast("Auto Edit: " + d.error, "error");
+      }
+    };
     window.addEventListener("rr-edit", onEdit);
     return () => { window.removeEventListener("rr-edit", onEdit); save(); setClock({ t: 0, playing: false }); setState({ editName: "", editDirty: false }); };
   }, [pid]);
@@ -124,7 +143,23 @@ function Workspace({ pid }: { pid: string }) {
   }, [assets]);
   useEffect(() => { if (p) setState({ editName: p.name }); }, [p?.name]);
 
-  const fit = () => { const q = pRef.current; const w = (tlBox.current?.clientWidth || 1200) - 190; if (q) setPps(clamp(w / Math.max(4, projDur(q) * 1.04), 0.5, 600)); };
+  const cursorOffset = p?.cursor?.offset;
+  useEffect(() => { if (p?.cursor?.events) { const t = setTimeout(() => save().then(() => get<Events>("/api/edit/events", { id: pid }).then(setEvents).catch(() => {})), 500); return () => clearTimeout(t); } }, [cursorOffset]);
+  const runAuto = async (opts: Record<string, any>) => {
+    setClock({ playing: false });
+    dirty.current = true; await save();
+    setAuto({ state: "running", stage: "Starting", frac: 0 });
+    api("/api/edit/auto", { id: pid, opts }).catch((e) => { setAuto({ state: "failed", stage: "", frac: 0, error: e.message }); });
+  };
+  const addEl = (part: Partial<El>) => {
+    const q = pRef.current; if (!q) return;
+    const t = getClock().t, id = uid();
+    const dur = part.kind === "caption" ? 2.5 : part.kind === "zoom" ? 3 : part.shape === "blur" ? Math.max(3, projDur(q) - t) : 3;
+    const step = part.shape === "step" ? { n: (q.els || []).filter((e) => e.shape === "step").length + 1 } : {};
+    commit((x) => ({ ...x, els: [...(x.els || []), { id, kind: "text", start: r3(t), dur, ...part, ...step } as El] }));
+    setSel([id]);
+  };
+  const fit = () => { const q = pRef.current; const w = (tlBox.current?.clientWidth || 1200) - 216; if (q) setPps(clamp(w / Math.max(4, projDur(q) * 1.04), 0.5, 600)); };
   useEffect(() => { if (p && pps === 40) fit(); }, [!!p]);
 
   const importMedia = async () => {
@@ -152,18 +187,23 @@ function Workspace({ pid }: { pid: string }) {
       case "undo": if (undo.current.length) { redo.current.push(q); setP(undo.current.pop()!); touch(); force((n) => n + 1); } break;
       case "redo": if (redo.current.length) { undo.current.push(q); setP(redo.current.pop()!); touch(); force((n) => n + 1); } break;
       case "split": { const r = splitAt(q, t, s); if (r.made.length) { commit(() => ({ ...q, items: r.items })); setSel(r.made); } else toast("Move the playhead over a clip to split it.", "info"); break; }
-      case "delete": case "ripple": if (s.length) { commit((x) => ({ ...x, items: removeItems(x, s, c === "ripple") })); setSel([]); } break;
+      case "delete": case "ripple": if (s.length) {
+        commit((x) => ({ ...x, items: removeItems(x, s, c === "ripple"), els: (c === "ripple" ? rippleEls(x, s) : x.els || []).filter((e) => !s.includes(e.id)) })); setSel([]);
+      } break;
       case "duplicate": if (s.length) {
         const made = q.items.filter((it) => s.includes(it.id)).map((it) => ({ ...it, id: uid(), start: r3(itemEnd(it)) }));
-        commit((x) => ({ ...x, items: settle([...x.items, ...made], new Set(made.map((m) => m.id))) })); setSel(made.map((m) => m.id));
+        const madeE = (q.els || []).filter((e) => s.includes(e.id)).map((e) => ({ ...e, id: uid(), start: r3(elEnd(e)), auto: false }));
+        commit((x) => ({ ...x, items: settle([...x.items, ...made], new Set(made.map((m) => m.id))), els: [...(x.els || []), ...madeE] })); setSel([...made, ...madeE].map((m) => m.id));
       } break;
-      case "copy": clip.current = q.items.filter((it) => s.includes(it.id)); if (clip.current.length) toast(`${clip.current.length} clip${clip.current.length > 1 ? "s" : ""} copied`, "info"); break;
-      case "paste": if (clip.current.length) {
-        const t0 = Math.min(...clip.current.map((it) => it.start));
-        const made = clip.current.filter((it) => q.tracks.some((tr) => tr.id === it.track)).map((it) => ({ ...it, id: uid(), start: r3(t + it.start - t0) }));
-        commit((x) => ({ ...x, items: settle([...x.items, ...made], new Set(made.map((m) => m.id))) })); setSel(made.map((m) => m.id));
+      case "copy": { clip.current = { items: q.items.filter((it) => s.includes(it.id)), els: (q.els || []).filter((e) => s.includes(e.id)) };
+        const n = clip.current.items.length + clip.current.els.length; if (n) toast(`${n} item${n > 1 ? "s" : ""} copied`, "info"); break; }
+      case "paste": if (clip.current.items.length + clip.current.els.length) {
+        const t0 = Math.min(...clip.current.items.map((it) => it.start), ...clip.current.els.map((e) => e.start));
+        const made = clip.current.items.filter((it) => q.tracks.some((tr) => tr.id === it.track)).map((it) => ({ ...it, id: uid(), start: r3(t + it.start - t0) }));
+        const madeE = clip.current.els.map((e) => ({ ...e, id: uid(), start: r3(t + e.start - t0), auto: false }));
+        commit((x) => ({ ...x, items: settle([...x.items, ...made], new Set(made.map((m) => m.id))), els: [...(x.els || []), ...madeE] })); setSel([...made, ...madeE].map((m) => m.id));
       } break;
-      case "selectAll": setSel(q.items.map((it) => it.id)); break;
+      case "selectAll": setSel([...q.items.map((it) => it.id), ...(q.els || []).map((e) => e.id)]); break;
       case "zoomIn": setPpsRaw((v) => clamp(v * 1.4, 0.5, 600)); break;
       case "zoomOut": setPpsRaw((v) => clamp(v / 1.4, 0.5, 600)); break;
       case "zoomFit": fit(); break;
@@ -227,6 +267,7 @@ function Workspace({ pid }: { pid: string }) {
   if (err) return <div className="page center"><p>{err}</p><Btn onClick={() => setState({ editProject: "" })}>Back to projects</Btn></div>;
   if (!p) return <div className="page center"><span className="spin big" /></div>;
   const selItems = p.items.filter((it) => sel.includes(it.id));
+  const selEls = (p.els || []).filter((e) => sel.includes(e.id));
 
   return (
     <div className="ve">
@@ -234,13 +275,17 @@ function Workspace({ pid }: { pid: string }) {
         <button className="ve-back" title="All projects" onClick={() => run("home")}><Icon name="left" size={16} /></button>
         <input className="ve-title" value={p.name} spellCheck={false} onChange={(e) => commit((q) => ({ ...q, name: e.target.value }), "name")} />
         <span className="grow" />
+        <Btn small icon="wand" busy={auto?.state === "running"} onClick={() => runAuto({})}>Auto Edit</Btn>
         <Btn small icon="plus" onClick={importMedia}>Import media</Btn>
         <Btn small kind="primary" icon="download" onClick={() => run("export")}>Export</Btn>
       </div>
       <div className="ve-top">
-        <MediaBin p={p} assets={assets} onImport={importMedia} onAdd={addToTimeline} />
-        <Stage p={p} assets={assets} sel={sel} setSel={setSel} begin={begin} update={update} />
-        <PropsPanel p={p} items={selItems} commit={commit} />
+        <LeftPanel p={p} assets={assets} items={selItems} commit={commit} onImport={importMedia} onAdd={addToTimeline} addEl={addEl} auto={auto} runAuto={runAuto}
+          cancelAuto={() => api("/api/edit/auto/cancel", { id: pid }).catch(() => {})} />
+        <Stage p={p} assets={assets} events={events} sel={sel} setSel={setSel} begin={begin} update={update} />
+        {selEls.length === 1 && !selItems.length
+          ? <aside className="ve-panel ve-props"><div className="ve-ptitle"><span>{selEls[0].kind === "zoom" ? "Zoom" : selEls[0].kind === "caption" ? "Caption" : selEls[0].kind === "text" ? "Text" : "Shape"}</span></div><ElProps p={p} e={selEls[0]} commit={commit} /></aside>
+          : <PropsPanel p={p} items={selItems} commit={commit} />}
       </div>
       <div className="ve-split" onPointerDown={splitter} title="Drag to resize the timeline" />
       <div className="ve-tl" ref={tlBox} style={tlH ? { height: tlH } : undefined}>
@@ -267,46 +312,9 @@ function StatusBar({ p, sel, pps }: { p: EProject; sel: Item[]; pps: number }) {
   );
 }
 
-// ================================================================ media bin
-function MediaBin({ p, assets, onImport, onAdd }: { p: EProject; assets: Record<string, Assets>; onImport: () => void; onAdd: (m: Media) => void }) {
-  return (
-    <aside className="ve-panel ve-bin">
-      <div className="ve-ptitle"><span>Media</span><button title="Import video, audio or images (Ctrl+I)" onClick={onImport}><Icon name="plus" size={14} /></button></div>
-      <div className="ve-bin-list">
-        {p.media.map((m) => {
-          const a = assets[m.id];
-          return (
-            <div key={m.id} className="ve-media" draggable onDragStart={(e) => { e.dataTransfer.setData("text/rr-media", m.id); e.dataTransfer.effectAllowed = "copy"; }}
-              onDoubleClick={() => onAdd(m)} title={`${m.name}\nDrag onto the timeline, or double-click to add at the end`}>
-              <div className="ve-mthumb">
-                {a?.poster ? <img src={mediaUrl(a.poster)} alt="" draggable={false} /> : <Icon name={m.kind === "audio" ? "music" : m.kind === "image" ? "image" : "film"} size={20} />}
-                {m.kind !== "image" && <span className="dur">{tc(m.duration, 30, false)}</span>}
-                {a && !a.ready && <span className="ve-mbusy"><span className="spin" /></span>}
-              </div>
-              <div className="ve-mname"><b>{m.name}</b><span>{m.kind === "audio" ? "Audio" : `${m.width}×${m.height}`}{a?.need_proxy && !a.proxy && !a.ready ? " · preparing preview" : ""}</span></div>
-              <button className="ve-madd" title="Add to the timeline" onClick={() => onAdd(m)}><Icon name="plus" size={14} /></button>
-            </div>
-          );
-        })}
-        {!p.media.length && <p className="muted small ve-bin-empty">No media yet. Import a video to begin.</p>}
-      </div>
-      <button className="ve-import" onClick={onImport}><Icon name="upload" size={16} /> Import media</button>
-    </aside>
-  );
-}
-
 // ================================================================ properties
 const SIZES: [string, string, number, number][] = [["1920x1080", "Full HD 16:9 · 1920×1080", 1920, 1080], ["2560x1440", "QHD 16:9 · 2560×1440", 2560, 1440],
   ["3840x2160", "4K 16:9 · 3840×2160", 3840, 2160], ["1280x720", "HD 16:9 · 1280×720", 1280, 720], ["1080x1920", "Vertical 9:16 · 1080×1920", 1080, 1920], ["1080x1080", "Square 1:1 · 1080×1080", 1080, 1080]];
-
-function Num({ label, value, min, max, step = 1, unit = "", onChange }: { label: string; value: number; min: number; max: number; step?: number; unit?: string; onChange: (v: number) => void }) {
-  return (
-    <label className="ve-num"><span>{label}</span>
-      <input type="range" min={min} max={max} step={step} value={clamp(value, min, max)} style={{ ["--p" as any]: ((clamp(value, min, max) - min) / (max - min)) * 100 + "%" }} onChange={(e) => onChange(Number(e.target.value))} />
-      <input type="number" min={min} max={max} step={step} value={Math.round(value * 100) / 100} onChange={(e) => { const v = Number(e.target.value); if (!Number.isNaN(v)) onChange(clamp(v, min, max)); }} /><i>{unit}</i>
-    </label>
-  );
-}
 
 function PropsPanel({ p, items, commit }: { p: EProject; items: Item[]; commit: (fn: (q: EProject) => EProject, tag?: string) => void }) {
   const it = items.length === 1 ? items[0] : null;
@@ -322,7 +330,7 @@ function PropsPanel({ p, items, commit }: { p: EProject; items: Item[]; commit: 
             onChange={(v) => { const s = SIZES.find((x) => x[0] === v); if (s) commit((q) => ({ ...q, width: s[2], height: s[3] })); }} /></Field>
           <Field label="Frame rate"><Seg value={String(p.fps)} options={[["30", "30 fps"], ["60", "60 fps"]]} onChange={(v) => commit((q) => ({ ...q, fps: Number(v) }))} /></Field>
           <Field label="Background"><div className="ve-color"><input type="color" value={p.bg || "#000000"} onChange={(e) => commit((q) => ({ ...q, bg: e.target.value }), "bg")} /><span>{(p.bg || "#000000").toUpperCase()}</span></div></Field>
-          <p className="muted small ve-tip">Select a clip on the timeline or the canvas to change its size, position, speed and sound.</p>
+          <p className="muted small ve-tip">Select a clip, text, shape or zoom to change it. Looks and transitions for clips are under the sliders tab on the left.</p>
         </div>
       </aside>
     );
@@ -366,6 +374,8 @@ function PropsPanel({ p, items, commit }: { p: EProject; items: Item[]; commit: 
             <h4>Sound</h4>
             <Num label="Volume" unit="%" min={0} max={200} value={first.volume * 100} onChange={(v) => set({ volume: v / 100 }, "vol")} />
             <Toggle on={!!first.muted} onChange={(v) => set({ muted: v }, "mute")} label="Mute this clip" />
+            <Toggle on={!!first.afx?.denoise} onChange={(v) => set({ afx: { ...first.afx, denoise: v } }, "dn")} label="Remove background noise" hint="Heard in the export" />
+            <Toggle on={!!first.afx?.level} onChange={(v) => set({ afx: { ...first.afx, level: v } }, "lv")} label="Even out the volume" hint="Heard in the export" />
           </>
         )}
       </div>

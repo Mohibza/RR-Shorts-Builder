@@ -27,7 +27,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .config import data_dir
-from .utils import Cancelled, NO_WINDOW, encoder_args, find_ffmpeg, pick_encoder, probe, run, run_ffmpeg, safe_name
+from . import fonts, vfx
+from .utils import (Cancelled, encoder_args, ffmpeg_cwd, filter_path, find_ffmpeg, pick_encoder, probe, run, run_ffmpeg,
+                    safe_name)
 
 EDIT_DIR = data_dir() / "edits"
 CACHE = EDIT_DIR / "_cache"
@@ -241,7 +243,8 @@ def create(name: str = "", paths: Optional[list[str]] = None, recording: Optiona
     small picture in the corner) and PC sound each get their own track, lined up."""
     pid = time.strftime("%Y%m%d-%H%M%S") + "-" + _id()[:4]
     p = {"id": pid, "name": name or "Untitled project", "created": time.time(), "updated": time.time(),
-         "width": 1920, "height": 1080, "fps": 30, "bg": "#000000", "media": [], "items": [],
+         "width": 1920, "height": 1080, "fps": 30, "bg": "#000000", "media": [], "items": [], "els": [],
+         "captions": dict(CAPTION_STYLE),
          "tracks": [{"id": "v1", "kind": "video", "name": "Video 1", "muted": False, "hidden": False},
                     {"id": "v2", "kind": "video", "name": "Video 2", "muted": False, "hidden": False},
                     {"id": "a1", "kind": "audio", "name": "Audio 1", "muted": False, "hidden": False},
@@ -258,6 +261,7 @@ def create(name: str = "", paths: Optional[list[str]] = None, recording: Optiona
             cam = describe(recording["webcam"])
             p["media"].append(cam)
             p["tracks"][1]["name"] = "Webcam"
+            p["tracks"][1]["pin"] = True               # the webcam stays in its corner when the screen zooms
             p["items"].append(new_item(cam, "v2", scale=0.24, x=0.865, y=0.84, muted=True))
         if recording.get("system") and Path(recording["system"]).is_file():
             snd = describe(recording["system"])
@@ -267,6 +271,10 @@ def create(name: str = "", paths: Optional[list[str]] = None, recording: Optiona
         p["recording"] = recording.get("id") or ""
         p["markers"] = list(recording.get("markers") or [])
         p["events"] = recording.get("events") or ""
+        if p["events"]:
+            p["cursor"] = {"media": scr["id"], "events": p["events"], "ripple": True, "ripple_color": "#FFD400",
+                           "highlight": False, "highlight_color": "#FFD400", "spotlight": False, "size": 1.0,
+                           "offset": 0.0 if recording.get("events_synced") else 1.5}
     else:
         t, first = {"v1": 0.0, "a1": 0.0}, True
         for path in paths or []:
@@ -286,7 +294,11 @@ def create(name: str = "", paths: Optional[list[str]] = None, recording: Optiona
 
 
 def load(pid: str) -> Optional[dict]:
-    return _read(_pfile(pid))
+    p = _read(_pfile(pid))
+    if p is not None:                      # projects made before effects existed
+        p.setdefault("els", [])
+        p.setdefault("captions", dict(CAPTION_STYLE))
+    return p
 
 
 def save(p: dict) -> dict:
@@ -378,99 +390,249 @@ def _atempo(speed: float) -> list[str]:
     return out
 
 
+CAPTION_STYLE = {"font": "Poppins", "size": 0.05, "color": "#FFFFFF", "bold": True, "box": True, "box_color": "#000000",
+                 "box_alpha": 0.62, "box_pad": 12, "stroke": 0, "shadow": 0, "y": 0.88, "upper": False,
+                 "anim_in": {"type": "fade", "dur": 0.12}}
+_PLAIN = ("x", "y", "scale", "rot", "opacity", "crop", "fx", "volume", "muted", "afx")
+
+
+def _plain(it: dict) -> bool:
+    return (abs(float(it.get("speed") or 1) - 1) < 1e-6 and not it.get("fade_in") and not it.get("fade_out")
+            and not (it.get("enter") or {}).get("type") and not (it.get("exit") or {}).get("type")
+            and not it.get("tail"))
+
+
+def _units(items: list[dict], fps: int) -> list[list[dict]]:
+    """Group clips that were cut out of one take (same file, same look, back to back on the timeline) so the file
+    is decoded once instead of once per piece. A hundred jump cuts stay as fast as one clip."""
+    out: list[list[dict]] = []
+    for it in items:
+        prev = out[-1][-1] if out else None
+        if (prev is not None and _plain(it) and _plain(prev) and prev["track"] == it["track"]
+                and prev["media"] == it["media"] and it["in"] >= prev["out"] - 0.5 / fps
+                and abs(it["start"] - (prev["start"] + prev["out"] - prev["in"])) < 1.5 / fps
+                and all(prev.get(k) == it.get(k) for k in _PLAIN)):
+            out[-1].append(it)
+        else:
+            out.append([it])
+    return out
+
+
+def _cursor(p: dict) -> tuple[dict, dict]:
+    cur = p.get("cursor") or {}
+    if not cur.get("events") or not (cur.get("ripple", True) or cur.get("highlight") or cur.get("spotlight")):
+        return {}, {}
+    return cur, vfx.load_events(cur["events"], float(cur.get("offset") or 0))
+
+
 def build(p: dict, out_file: str, width: int = 0, height: int = 0, fps: int = 0, quality: str = "high",
-          encoder: str = "auto", audio: bool = True) -> tuple[list[str], float]:
+          encoder: str = "auto", audio: bool = True, tag: str = "x") -> tuple[list[str], float]:
     """FFmpeg arguments that render the project (and how long the result is)."""
     W, H = _even(width or p["width"]), _even(height or p["height"])
-    fps = int(fps or p.get("fps") or 30)
+    F = int(fps or p.get("fps") or 30)
     media = {m["id"]: m for m in p["media"]}
     tracks = {t["id"]: t for t in p["tracks"]}
     order = {t["id"]: i for i, t in enumerate(p["tracks"])}
     D = duration(p)
     if D <= 0.05:
         raise ValueError("The timeline is empty. Add a video first.")
+    work = EDIT_DIR / Path(p["id"]).name / "render"
+    work.mkdir(parents=True, exist_ok=True)
+    fdir = filter_path(fonts.fonts_dir())
+    n_ass = [0]
+
+    def ass_file(text: str) -> str:
+        n_ass[0] += 1
+        f = work / f"{tag}_{n_ass[0]}.ass"
+        f.write_text(text, encoding="utf-8")
+        return f"ass=filename={filter_path(f)}:fontsdir={fdir}"
+
     items = [it for it in p["items"] if it["media"] in media and it["track"] in tracks
              and it["out"] - it["in"] > 0.02 and it["start"] < D]
     items.sort(key=lambda it: (order[it["track"]], it["start"]))
+    cur, cev = _cursor(p)
     args: list[str] = []
-    graph = [f"color=c={p.get('bg') or '#000000'}:s={W}x{H}:r={fps}:d={D:.3f},format=yuv420p[bg0]"]
-    last, n_in, mixes = "bg0", 0, []
-    for it in items:
-        m, tr = media[it["media"]], tracks[it["track"]]
+    graph = [f"color=c={p.get('bg') or '#000000'}:s={W}x{H}:r={F}:d={D:.3f},format=yuv420p[bg0]"]
+    last, n_in = "bg0", 0
+    voice, music, pinned_ops = [], [], []
+    sx = W / p["width"]
+    for unit in _units(items, F):
+        it, m, tr = unit[0], media[unit[0]["media"]], tracks[unit[0]["track"]]
+        run = len(unit) > 1
         sp = max(0.05, float(it.get("speed") or 1))
-        src_len = it["out"] - it["in"]
-        dur = src_len / sp
+        st = float(it["start"])
+        tail = max(0.0, float(it.get("tail") or 0))
+        if run:                                     # frame-exact pieces: no drift however many cuts
+            cuts, total = [], 0
+            for a, nx in zip(unit, unit[1:] + [None]):
+                end_t = nx["start"] if nx else a["start"] + (a["out"] - a["in"])
+                cnt = int(round((end_t - st) * F)) - int(round((a["start"] - st) * F))
+                if cnt > 0:
+                    cuts.append((int(round((a["in"] - it["in"]) * F)), cnt))
+                    total += cnt
+            if not cuts:
+                continue
+            dur = total / F
+            src_len = (cuts[-1][0] + cuts[-1][1] + 2) / F
+        else:
+            src_len = it["out"] - it["in"]
+            dur = src_len / sp
         visual = tr["kind"] == "video" and m["kind"] in ("video", "image") and not tr.get("hidden")
         audible = (m.get("has_audio") and not it.get("muted") and not tr.get("muted")
                    and float(it.get("volume", 1)) > 0.001 and audio)
         if not visual and not audible:
             continue
         if m["kind"] == "image":
-            args += ["-loop", "1", "-framerate", str(fps), "-t", f"{dur:.3f}", "-i", m["path"]]
+            args += ["-loop", "1", "-framerate", str(F), "-t", f"{dur + tail:.3f}", "-i", m["path"]]
         else:
-            args += ["-ss", f"{it['in']:.3f}", "-t", f"{src_len:.3f}", "-i", m["path"]]
+            args += ["-ss", f"{it['in']:.3f}", "-t", f"{src_len + tail * sp + 0.05:.3f}", "-i", m["path"]]
         k = n_in
         n_in += 1
-        st = float(it["start"])
-        fi, fo = min(float(it.get("fade_in") or 0), dur / 2), min(float(it.get("fade_out") or 0), dur / 2)
+        ent, ext = it.get("enter") or {}, it.get("exit") or {}
+        fi = min(max(float(it.get("fade_in") or 0), float(ent.get("dur") or 0.5) if ent.get("type") in ("fade", "zoom") else 0), dur / 2)
+        fo = min(max(float(it.get("fade_out") or 0), float(ext.get("dur") or 0.5) if ext.get("type") in ("fade", "zoom") else 0), dur / 2)
         if visual:
             l, t, r, b = [min(0.9, max(0.0, float(v))) for v in (it.get("crop") or [0, 0, 0, 0])]
             cw, ch = max(2.0, m["width"] * (1 - l - r)), max(2.0, m["height"] * (1 - t - b))
-            f = min(p["width"] / cw, p["height"] / ch) * float(it.get("scale") or 1) * (W / p["width"])
+            f = min(p["width"] / cw, p["height"] / ch) * float(it.get("scale") or 1) * sx
             w, h = _even(cw * f), _even(ch * f)
             rot, op = float(it.get("rot") or 0), min(1.0, max(0.0, float(it.get("opacity", 1))))
-            ch_ = [f"setpts=(PTS-STARTPTS)/{sp:.5f}", f"fps={fps}"]
+            c: list[str] = []
+            if m["kind"] != "image":
+                c.append(f"fps={F}")
+            if cur and cur.get("media") == m["id"] and m["kind"] == "video":
+                txt = vfx.cursor_ass(cur, cev, float(it["in"]), float(it["in"]) + src_len, m["width"], m["height"])
+                if txt:
+                    c.append(ass_file(txt))
+            if run:
+                c.append("select='" + "+".join(f"between(n,{a},{a + n - 1})" for a, n in cuts) + f"',setpts=N/{F}/TB")
+            elif m["kind"] != "image":
+                c += [f"setpts=(PTS-STARTPTS)/{sp:.5f}", f"fps={F}"]
+            if tail > 0:
+                c.append(f"tpad=stop_mode=clone:stop_duration={tail:.3f}")
+                c.append(f"trim=0:{dur + tail:.3f}")
             if l or t or r or b:
-                ch_.append(f"crop=iw*{1 - l - r:.5f}:ih*{1 - t - b:.5f}:iw*{l:.5f}:ih*{t:.5f}")
-            ch_.append(f"scale={w}:{h}:flags=bicubic")
+                c.append(f"crop=iw*{1 - l - r:.5f}:ih*{1 - t - b:.5f}:iw*{l:.5f}:ih*{t:.5f}")
+            c += vfx.fx_filters(it.get("fx"))
+            x_off, y_off, zoomy = vfx.enter_exit(it, dur, W, H)
+            if zoomy:
+                M = vfx.scale_anim(it, dur, "t")
+                c.append(f"scale=w='2*trunc({w}*{M}/2)':h='2*trunc({h}*{M}/2)':eval=frame:flags=bicubic")
+            else:
+                c.append(f"scale={w}:{h}:flags=bicubic")
             alpha = abs(rot) > 0.01 or op < 0.999 or fi > 0 or fo > 0 or m["path"].lower().endswith((".png", ".webp"))
             if alpha:
-                ch_.append("format=rgba")
+                c.append("format=rgba")
                 if abs(rot) > 0.01:
                     a = math.radians(rot)
-                    ch_.append(f"rotate={a:.6f}:ow=rotw({a:.6f}):oh=roth({a:.6f}):c=none")
+                    c.append(f"rotate={a:.6f}:ow=rotw({a:.6f}):oh=roth({a:.6f}):c=none")
                 if op < 0.999:
-                    ch_.append(f"colorchannelmixer=aa={op:.4f}")
+                    c.append(f"colorchannelmixer=aa={op:.4f}")
                 if fi > 0:
-                    ch_.append(f"fade=t=in:st=0:d={fi:.3f}:alpha=1")
+                    c.append(f"fade=t=in:st=0:d={fi:.3f}:alpha=1")
                 if fo > 0:
-                    ch_.append(f"fade=t=out:st={dur - fo:.3f}:d={fo:.3f}:alpha=1")
-            ch_.append(f"setpts=PTS+{st:.3f}/TB")
-            graph.append(f"[{k}:v]" + ",".join(ch_) + f"[v{k}]")
+                    c.append(f"fade=t=out:st={dur - fo:.3f}:d={fo:.3f}:alpha=1")
+            c.append(f"setpts=PTS+{st:.3f}/TB")
+            graph.append(f"[{k}:v]" + ",".join(c) + f"[v{k}]")
             cx, cy = float(it.get("x", 0.5)) * W, float(it.get("y", 0.5)) * H
-            graph.append(f"[{last}][v{k}]overlay=x={cx:.2f}-w/2:y={cy:.2f}-h/2:eof_action=pass:"
-                         f"enable='between(t,{st:.3f},{st + dur:.3f})'[o{k}]")
-            last = f"o{k}"
+            if zoomy:                                # the size changes every frame: centre it by the same formula
+                M = vfx.scale_anim(it, dur, f"(t-{st:.3f})")
+                xs, ys = f"{cx:.2f}-{w}*{M}/2", f"{cy:.2f}-{h}*{M}/2"
+            else:
+                xs, ys = f"{cx:.2f}-w/2", f"{cy:.2f}-h/2"
+            ov = (f"overlay=x='{xs}{x_off}':y='{ys}{y_off}':eof_action=pass:"
+                  f"enable='between(t,{st:.3f},{st + dur + tail:.3f})'")
+            if tr.get("pin"):
+                pinned_ops.append((f"v{k}", ov))
+            else:
+                graph.append(f"[{last}][v{k}]{ov}[o{k}]")
+                last = f"o{k}"
         if audible:
-            ac = ["asetpts=PTS-STARTPTS"] + _atempo(sp)
-            ac += ["aresample=48000", "aformat=sample_fmts=fltp:channel_layouts=stereo",
-                   f"volume={float(it.get('volume', 1)):.4f}"]
-            if fi > 0:
+            if run and len(cuts) > 1:
+                graph.append(f"[{k}:a]asplit={len(cuts)}" + "".join(f"[s{k}_{i}]" for i in range(len(cuts))))
+                for i, (a, n) in enumerate(cuts):
+                    graph.append(f"[s{k}_{i}]atrim=start={a / F:.5f}:end={(a + n) / F:.5f},asetpts=PTS-STARTPTS[t{k}_{i}]")
+                graph.append("".join(f"[t{k}_{i}]" for i in range(len(cuts))) + f"concat=n={len(cuts)}:v=0:a=1[c{k}]")
+                src, ac = f"[c{k}]", []
+            elif run:
+                src, ac = f"[{k}:a]", [f"atrim=start={cuts[0][0] / F:.5f}:end={(cuts[0][0] + cuts[0][1]) / F:.5f}", "asetpts=PTS-STARTPTS"]
+            else:
+                src, ac = f"[{k}:a]", ["asetpts=PTS-STARTPTS"] + _atempo(sp)
+            ac += ["aresample=48000", "aformat=sample_fmts=fltp:channel_layouts=stereo"]
+            afx = it.get("afx") or {}
+            if afx.get("denoise"):
+                ac += ["highpass=f=70", "afftdn=nr=12:nf=-40"]
+            if afx.get("level"):
+                ac.append("dynaudnorm=f=250:g=15:p=0.9:m=12")
+            ac.append(f"volume={float(it.get('volume', 1)):.4f}")
+            if fi > 0 and it.get("fade_in"):
                 ac.append(f"afade=t=in:st=0:d={fi:.3f}")
-            if fo > 0:
+            if fo > 0 and it.get("fade_out"):
                 ac.append(f"afade=t=out:st={max(0.0, dur - fo):.3f}:d={fo:.3f}")
             ac.append(f"atrim=0:{dur:.3f}")
             if st > 0.0005:
                 ac.append(f"adelay={int(round(st * 1000))}:all=1")
-            graph.append(f"[{k}:a]" + ",".join(ac) + f"[a{k}]")
-            mixes.append(f"[a{k}]")
+            graph.append(src + ",".join(ac) + f"[a{k}]")
+            (music if tr.get("duck") else voice).append(f"[a{k}]")
+
+    # ---- what is drawn on the picture: blurred areas, shapes and text that zoom with it, the zoom, then what stays put
+    n = 0
+    for e in p.get("els") or []:
+        if e.get("kind") == "shape" and e.get("shape") == "blur":
+            n += 1
+            bw, bh = _even(max(8, float(e.get("w", 0.2)) * W)), _even(max(8, float(e.get("h", 0.1)) * H))
+            bx = int(min(W - bw, max(0, float(e.get("x", 0.5)) * W - bw / 2)))
+            by = int(min(H - bh, max(0, float(e.get("y", 0.5)) * H - bh / 2)))
+            a, b = float(e["start"]), float(e["start"]) + float(e.get("dur") or 0)
+            r = max(2, min(int(min(bw, bh) / 4) - 1, int(float(e.get("strength") or 0.6) * 30 * H / 1080)))
+            graph.append(f"[{last}]split[bA{n}][bB{n}]")
+            graph.append(f"[bB{n}]crop={bw}:{bh}:{bx}:{by},boxblur={r}:2[bC{n}]")
+            graph.append(f"[bA{n}][bC{n}]overlay={bx}:{by}:enable='between(t,{a:.3f},{b:.3f})'[bD{n}]")
+            last = f"bD{n}"
+    txt = vfx.overlay_ass(p, False, W, H)
+    if txt:
+        graph.append(f"[{last}]{ass_file(txt)}[asu]")
+        last = "asu"
+    keys = vfx.zoom_keys(p.get("els") or [])
+    if keys:
+        graph += vfx.zoom_filters(keys, W, H, last, "zoomed", F, D)
+        last = "zoomed"
+    for i, (lab, ov) in enumerate(pinned_ops):
+        graph.append(f"[{last}][{lab}]{ov}[pn{i}]")
+        last = f"pn{i}"
+    txt = vfx.overlay_ass(p, True, W, H)
+    if txt:
+        graph.append(f"[{last}]{ass_file(txt)}[asp]")
+        last = "asp"
     vmap, amap = f"[{last}]", "[aout]"
     if not audio:
         return args + ["-filter_complex", ";".join(graph), "-map", vmap], D
-    if mixes:
-        graph.append("".join(mixes) + f"amix=inputs={len(mixes)}:normalize=0:dropout_transition=0,"
-                     f"alimiter=limit=0.97:level=0,apad,atrim=0:{D:.3f}[aout]")
+    fin = f"alimiter=limit=0.97:level=0,apad,atrim=0:{D:.3f}[aout]"
+
+    def mix(labels: list[str], out: str) -> str:
+        if len(labels) == 1:
+            return f"{labels[0]}anull[{out}]"
+        return "".join(labels) + f"amix=inputs={len(labels)}:normalize=0:dropout_transition=0[{out}]"
+    if voice and music:                              # music dips while someone is talking
+        graph.append(mix(voice, "vx"))
+        graph.append(mix(music, "mx"))
+        graph.append("[vx]asplit[vx1][vx2]")
+        graph.append("[mx][vx2]sidechaincompress=threshold=0.02:ratio=9:attack=15:release=450:makeup=1[mxd]")
+        graph.append(f"[vx1][mxd]amix=inputs=2:normalize=0:dropout_transition=0,{fin}")
+    elif voice or music:
+        graph.append(mix(voice or music, "ax"))
+        graph.append(f"[ax]{fin}")
     else:
         graph.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{D:.3f}[aout]")
     enc = pick_encoder(encoder or "auto")
     crf = {"high": 18, "medium": 21, "small": 25}.get(quality, 19)
     ea = encoder_args(enc, crf, "fast")
     if "-g" in ea:
-        ea[ea.index("-g") + 1] = str(fps * 2)
+        ea[ea.index("-g") + 1] = str(F * 2)
     if W * H > 2560 * 1440 and "-maxrate" in ea:            # 4K needs more room than the Shorts ceiling
         ea[ea.index("-maxrate") + 1] = "60M"
         ea[ea.index("-bufsize") + 1] = "120M"
-    args += ["-filter_complex", ";".join(graph), "-map", vmap, "-map", amap, *ea, "-r", str(fps),
+    args += ["-filter_complex", ";".join(graph), "-map", vmap, "-map", amap, *ea, "-r", str(F),
              "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", f"{D:.3f}", "-movflags", "+faststart", out_file]
     return args, D
 
@@ -495,8 +657,8 @@ def export(pid: str, out_dir: Path, opts: dict, emit: Callable, encoder: str = "
     while out.exists():
         out = out_dir / f"{base} ({i}).mp4"
         i += 1
-    args, D = build(p, str(out), W, H, int(opts.get("fps") or 0), str(opts.get("quality") or "high"), encoder)
     eid = _id()
+    args, D = build(p, str(out), W, H, int(opts.get("fps") or 0), str(opts.get("quality") or "high"), encoder, tag=eid)
     job = {"id": eid, "project": pid, "state": "running", "frac": 0.0, "file": str(out), "error": "",
            "name": out.name, "width": W, "height": H, "started": time.time()}
     EXPORTS[eid] = job
@@ -517,7 +679,7 @@ def export(pid: str, out_dir: Path, opts: dict, emit: Callable, encoder: str = "
                 last[0] = time.time()
                 tell()
         try:
-            run_ffmpeg(args, D, prog, cancel)
+            run_ffmpeg(args, D, prog, cancel, ffmpeg_cwd())
             job.update(state="done", frac=1.0)
         except Cancelled:
             job.update(state="cancelled")
@@ -555,6 +717,10 @@ def window(p: dict, t0: float, t1: float) -> dict:
             n["fade_out"] = 0.0
         n["start"] = max(0.0, a - t0)
         q["items"].append(n)
+    q["els"] = [{**e, "start": e["start"] - t0} for e in p.get("els") or []
+                if e["start"] < t1 and e["start"] + e.get("dur", 0) > t0]
+    if p.get("cursor"):
+        q["cursor"] = p["cursor"]
     return q
 
 
@@ -569,7 +735,7 @@ def frame(pid_or_project, t: float, out_file: str, width: int = 960) -> bool:
     q = window(p, max(0.0, t), t + 3.0 / fps)
     if not q["items"]:
         return False
-    args, _ = build(q, out_file, W, H, audio=False)
+    args, _ = build(q, out_file, W, H, audio=False, tag="frame")
     r = run([find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *args, "-frames:v", "1", "-q:v", "3", out_file],
-            timeout=120)
+            cwd=ffmpeg_cwd(), timeout=120)
     return r.returncode == 0 and Path(out_file).exists()

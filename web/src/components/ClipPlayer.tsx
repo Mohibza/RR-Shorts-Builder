@@ -48,8 +48,8 @@ export function setFontMetrics(m: typeof METRICS | undefined) { if (m) METRICS =
 
 // ASS/libass font sizes measure the whole font height (win ascent+descent); CSS sizes measure the em square.
 // emOf() converts, so a size-190 caption in the export and in the preview are the same pixels.
-const emOf = (font: string) => METRICS[font]?.em ?? 0.8;
-const dyOf = (font: string) => METRICS[font]?.dy ?? 0;    // baseline difference libass vs browser, in font sizes
+export const emOf = (font: string) => METRICS[font]?.em ?? 0.8;
+export const dyOf = (font: string) => METRICS[font]?.dy ?? 0;    // baseline difference libass vs browser, in font sizes
 function textW(font: string, text: string, size: number) {
   const m = METRICS[font];
   if (!m) return text.length * size * (CHAR_W[font] ?? 0.6);

@@ -78,6 +78,11 @@ export function StudioPage() {
   const clash = useMemo(() => Object.entries(hk).filter(([, v]) => ["ctrl+s", "ctrl+c", "ctrl+v", "ctrl+z", "ctrl+x", "ctrl+a", "ctrl+p", "ctrl+r", "ctrl+f", "ctrl+t", "ctrl+w", "ctrl+n"].includes(v)).map(([, v]) => pretty(v)), [JSON.stringify(hk)]);
   const begin = async () => {
     if (Object.keys(probs).length) { toast("Fix the shortcut keys marked in red first.", "error"); return; }
+    setCount(-1);                    // first: find the smoothest way to capture on this PC (a few seconds, once)
+    try {
+      const pr = await api<{ note: string; fps: number; measured: number; method: string }>("/api/record/prepare", {});
+      if (pr.note) toast(pr.note, "info");
+    } catch { /* the recorder falls back by itself */ }
     const n = Math.max(0, Math.min(10, Number(s.rec_countdown ?? 3)));
     for (let i = n; i > 0; i--) { setCount(i); await new Promise((r) => setTimeout(r, 1000)); }
     setCount(0);
@@ -93,7 +98,9 @@ export function StudioPage() {
 
   if (count !== null) return (
     <div className="page center rec-count">
-      {count > 0 ? <><b>{count}</b><p>Recording starts, and this window closes.</p></> : <><span className="spin big" /><p>Starting… the app is closing.</p></>}
+      {count > 0 ? <><b>{count}</b><p>Recording starts, and this window closes.</p></>
+        : count < 0 ? <><span className="spin big" /><p>Checking this PC for the smoothest capture…</p><p className="muted small">This takes a few seconds the first time and is remembered afterwards.</p></>
+        : <><span className="spin big" /><p>Starting… the app is closing.</p></>}
       <p className="muted">Stop and save with <b>{pretty(hk.stop)}</b> · pause <b>{pretty(hk.pause)}</b> · resume <b>{pretty(hk.resume)}</b></p>
       {count > 0 && <Btn kind="ghost" onClick={() => location.reload()}>Cancel</Btn>}
     </div>
@@ -141,6 +148,7 @@ export function StudioPage() {
             <Field label="Capture method" hint="Use Compatible only if a recording comes out black or stuttering."><Seg value={s.rec_method || "auto"} options={[["auto", "Fastest"], ["compatible", "Compatible"]]} onChange={(v) => set({ rec_method: v })} /></Field>
           </div>
           <Field label="Name (optional)"><input className="input" value={name} placeholder="e.g. Tutorial part 1" onChange={(e) => setName(e.target.value)} /></Field>
+          <button className="linkbtn" onClick={() => { toast("Testing capture speed…", "info"); api<{ measured: number; fps: number; method: string; note: string; tried: { name: string; fps: number }[] }>("/api/record/prepare", { retest: true }).then((r) => toast(r.method ? `Best method: ${r.method}, ${Math.round(r.measured)} of ${r.fps} frames a second.${r.note ? " " + r.note : ""}` : "No capture method worked. Try Capture method: Compatible.", r.method ? "ok" : "error")).catch((e) => toast(e.message, "error")); }}>Test capture speed again</button>
           <Btn kind="primary" icon="play" className="rec-go" disabled={!dev || !!active || (dev && !dev.windows_os)} onClick={begin}>Start recording</Btn>
           {dev && !dev.windows_os && <p className="muted small">Screen recording works on Windows.</p>}
         </section>

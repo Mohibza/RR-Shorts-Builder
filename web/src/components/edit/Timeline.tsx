@@ -1,14 +1,14 @@
 // The editor's timeline: tracks, clips with filmstrips and waveforms, trim / move / split, ruler and playhead.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { mediaUrl } from "../../lib/api";
-import { Assets, clamp, cmd, EProject, getClock, Item, itemDur, itemEnd, Media, projDur, r3, setClock, settle, snapPoints, snapTime, tc, Track, uid, useClock } from "../../lib/edit";
+import { Assets, clamp, cmd, El, EL_COLORS, elEnd, elLabel, EProject, getClock, Item, itemDur, itemEnd, Media, projDur, r3, setClock, settle, snapPoints, snapTime, tc, Track, uid, useClock } from "../../lib/edit";
 import { Icon } from "../Icon";
 
 type Props = { p: EProject; assets: Record<string, Assets>; sel: string[]; setSel: (ids: string[]) => void;
   begin: () => void; update: (fn: (p: EProject) => EProject) => void; commit: (fn: (p: EProject) => EProject, tag?: string) => void;
   pps: number; setPps: (v: number) => void; snap: boolean; setSnap: (v: boolean) => void; canUndo: boolean; canRedo: boolean };
 
-const HEAD = 26, VROW = 62, AROW = 46;
+const HEAD = 26, VROW = 62, AROW = 46, EROW = 24;
 const STEPS = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 3600];
 
 export function Timeline({ p, assets, sel, setSel, begin, update, commit, pps, setPps, snap, setSnap, canUndo, canRedo }: Props) {
@@ -17,9 +17,21 @@ export function Timeline({ p, assets, sel, setSel, begin, update, commit, pps, s
   const [view, setView] = useState({ x: 0, w: 1200 });
   const media = useMemo(() => Object.fromEntries(p.media.map((m) => [m.id, m])) as Record<string, Media>, [p.media]);
   const rows = useMemo(() => [...p.tracks.filter((t) => t.kind === "video").reverse(), ...p.tracks.filter((t) => t.kind === "audio")], [p.tracks]);
-  const rowTop = useMemo(() => { let y = HEAD; const o: Record<string, { y: number; h: number }> = {};
-    for (const t of rows) { const h = t.kind === "video" ? VROW : AROW; o[t.id] = { y, h }; y += h; } return o; }, [rows]);
-  const totalH = HEAD + rows.reduce((s, t) => s + (t.kind === "video" ? VROW : AROW), 0);
+  // rows for what sits on top of the picture: captions, text & shapes (as many lanes as overlap), zooms
+  const els = p.els || [];
+  const lanes = useMemo(() => {
+    const o: Record<string, number> = {}; const ends: number[] = [];
+    for (const e of els.filter((x) => x.kind === "text" || x.kind === "shape").sort((a, b) => a.start - b.start)) {
+      let l = ends.findIndex((x) => x <= e.start + 0.001); if (l < 0) { l = ends.length; ends.push(0); }
+      ends[l] = elEnd(e); o[e.id] = l;
+    }
+    return { of: o, n: Math.max(1, ends.length) };
+  }, [els]);
+  const erows = { caption: { y: HEAD, h: EROW }, over: { y: HEAD + EROW, h: lanes.n * EROW }, zoom: { y: HEAD + EROW + lanes.n * EROW, h: EROW } };
+  const TOP = HEAD + EROW * (2 + lanes.n);
+  const rowTop = useMemo(() => { let y = TOP; const o: Record<string, { y: number; h: number }> = {};
+    for (const t of rows) { const h = t.kind === "video" ? VROW : AROW; o[t.id] = { y, h }; y += h; } return o; }, [rows, TOP]);
+  const totalH = TOP + rows.reduce((s, t) => s + (t.kind === "video" ? VROW : AROW), 0);
   const D = projDur(p);
   const width = Math.max(view.w, (D + Math.max(10, view.w / pps * 0.5)) * pps);
   const pRef = useRef(p); pRef.current = p;
@@ -107,6 +119,43 @@ export function Timeline({ p, assets, sel, setSel, begin, update, commit, pps, s
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
   };
 
+  const dragEl = (e: React.PointerEvent, el: El) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const node = e.currentTarget as HTMLElement, r = node.getBoundingClientRect(), edge = Math.min(7, r.width / 4);
+    const mode = e.clientX - r.left < edge ? "l" : r.right - e.clientX < edge ? "r" : "move";
+    let ids = sel;
+    if (e.ctrlKey || e.shiftKey) { ids = sel.includes(el.id) ? sel.filter((x) => x !== el.id) : [...sel, el.id]; setSel(ids); if (!ids.includes(el.id)) return; }
+    else if (!sel.includes(el.id)) { ids = [el.id]; setSel(ids); }
+    if (mode !== "move") setClock({ t: clamp(getClock().t, el.start, elEnd(el) - 0.01), playing: false });
+    const start = pRef.current, sx = e.clientX, idset = new Set(mode === "move" ? ids : [el.id]);
+    const orig = Object.fromEntries((start.els || []).filter((x) => idset.has(x.id)).map((x) => [x.id, x]));
+    const pts = snapPoints(start, idset, getClock().t), tol = 8 / pps;
+    let moved = false;
+    const move = (ev: PointerEvent) => {
+      if (!moved) { if (Math.abs(ev.clientX - sx) < 3) return; moved = true; begin(); }
+      let dt = (ev.clientX - sx) / pps;
+      if (mode === "move") {
+        dt = Math.max(dt, -el.start);
+        if (snap) { const a = snapTime(el.start + dt, pts, tol), b = snapTime(elEnd(el) + dt, pts, tol); if (a !== el.start + dt) dt = a - el.start; else if (b !== elEnd(el) + dt) dt = b - elEnd(el); }
+        update((q) => ({ ...q, els: (q.els || []).map((o) => (orig[o.id] ? { ...o, start: r3(Math.max(0, orig[o.id].start + dt)) } : o)) }));
+      } else if (mode === "l") {
+        let ns = el.start + dt; if (snap) ns = snapTime(ns, pts, tol);
+        ns = clamp(ns, 0, elEnd(el) - 0.15);
+        update((q) => ({ ...q, els: (q.els || []).map((o) => (o.id === el.id ? { ...o, start: r3(ns), dur: r3(elEnd(el) - ns) } : o)) }));
+      } else {
+        let ne = elEnd(el) + dt; if (snap) ne = snapTime(ne, pts, tol);
+        update((q) => ({ ...q, els: (q.els || []).map((o) => (o.id === el.id ? { ...o, dur: r3(Math.max(0.15, ne - el.start)) } : o)) }));
+      }
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+      const t = getClock().t;                    // a plain click: bring the playhead onto it so it can be seen and edited
+      if (!moved && (t < el.start || t >= elEnd(el))) setClock({ t: r3(el.start + Math.min(el.dur / 2, (el.ease || el.anim_in?.dur || 0) + 0.1)), playing: false });
+    };
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+  };
+
   const drop = (e: React.DragEvent) => {
     const id = e.dataTransfer.getData("text/rr-media"); const m = media[id];
     if (!m) return;
@@ -162,12 +211,17 @@ export function Timeline({ p, assets, sel, setSel, begin, update, commit, pps, s
       <div className="tl-body">
         <div className="tl-heads" ref={heads}>
           <div className="tl-corner" style={{ height: HEAD }} />
+          <div className="tl-head el" style={{ height: erows.caption.h }}><Icon name="type" size={13} /><span>Captions</span></div>
+          <div className="tl-head el" style={{ height: erows.over.h }}><Icon name="layout" size={13} /><span>Text &amp; shapes</span></div>
+          <div className="tl-head el" style={{ height: erows.zoom.h }}><Icon name="search" size={13} /><span>Zoom</span></div>
           {rows.map((t) => {
             const empty = !p.items.some((it) => it.track === t.id), last = p.tracks.filter((x) => x.kind === t.kind).length <= 1;
             return (
               <div key={t.id} className={`tl-head ${t.kind}`} style={{ height: rowTop[t.id].h }}>
                 <Icon name={t.kind === "video" ? "film" : "music"} size={14} />
                 <input value={t.name} onChange={(e) => setTrack(t.id, { name: e.target.value })} spellCheck={false} />
+                {t.kind === "video" && <button title={t.pin ? "Stays fixed while the picture zooms (click to let it zoom too)" : "Zooms with the picture (click to keep it fixed, e.g. a webcam)"} className={t.pin ? "pinned" : ""} onClick={() => setTrack(t.id, { pin: !t.pin })}><Icon name="shield" size={13} /></button>}
+                {t.kind === "audio" && <button title={t.duck ? "Music: gets quieter while someone talks (click to switch off)" : "Make this a music track that gets quieter while someone talks"} className={t.duck ? "pinned" : ""} onClick={() => setTrack(t.id, { duck: !t.duck })}><Icon name="sliders" size={13} /></button>}
                 {t.kind === "video" && <button title={t.hidden ? "Show this track" : "Hide this track"} className={t.hidden ? "off" : ""} onClick={() => setTrack(t.id, { hidden: !t.hidden })}><Icon name={t.hidden ? "eyeoff" : "eye"} size={14} /></button>}
                 <button title={t.muted ? "Unmute this track" : "Mute this track"} className={t.muted ? "off" : ""} onClick={() => setTrack(t.id, { muted: !t.muted })}><Icon name={t.muted ? "mute" : "volume"} size={14} /></button>
                 {empty && !last && <button title="Remove this empty track" onClick={() => removeTrack(t.id)}><Icon name="x" size={13} /></button>}
@@ -180,6 +234,16 @@ export function Timeline({ p, assets, sel, setSel, begin, update, commit, pps, s
             <div className="tl-ruler" style={{ height: HEAD }} onPointerDown={scrub}>
               {ticks.map((t) => <span key={t} style={{ left: t * pps }}>{tc(t, p.fps, step < 1)}</span>)}
             </div>
+            <div className="tl-row el" style={{ top: erows.caption.y, height: erows.caption.h }} />
+            <div className="tl-row el" style={{ top: erows.over.y, height: erows.over.h }} />
+            <div className="tl-row el" style={{ top: erows.zoom.y, height: erows.zoom.h }} />
+            {els.filter((e) => elEnd(e) * pps > view.x - 200 && e.start * pps < view.x + view.w + 200).map((e) => {
+              const row = e.kind === "caption" ? erows.caption : e.kind === "zoom" ? erows.zoom : erows.over;
+              const top = row.y + (e.kind === "text" || e.kind === "shape" ? (lanes.of[e.id] || 0) * EROW : 0) + 2;
+              return <div key={e.id} className={`tl-el ${e.kind} ${sel.includes(e.id) ? "on" : ""}`} style={{ left: e.start * pps, width: Math.max(4, e.dur * pps), top, height: EROW - 4, ["--c" as any]: EL_COLORS[e.kind] }}
+                title={`${elLabel(e)} · ${tc(e.dur, 30, false)}${e.auto ? " · made by Auto Edit" : ""}`} onPointerDown={(ev) => dragEl(ev, e)}><span>{elLabel(e)}</span></div>;
+            })}
+            {(p.chapters || []).map((c, i) => <i key={"c" + i} className="tl-chapter" style={{ left: c.t * pps }} title={`Chapter: ${c.title}`} onPointerDown={(e) => { e.stopPropagation(); setClock({ t: c.t, playing: false }); }}><b>{c.title}</b></i>)}
             {rows.map((t) => <div key={t.id} className={`tl-row ${t.kind} ${t.hidden ? "hidden" : ""} ${t.muted ? "muted" : ""}`} style={{ top: rowTop[t.id].y, height: rowTop[t.id].h }} />)}
             {(p.markers || []).map((t, i) => <i key={i} className="tl-marker" style={{ left: t * pps }} title={`Marker ${i + 1} · ${tc(t, p.fps, false)}`} onPointerDown={(e) => { e.stopPropagation(); setClock({ t, playing: false }); }} />)}
             {p.items.filter(vis).map((it) => {
@@ -217,7 +281,7 @@ function Clip({ it, m, a, pps, top, h, view, on, audioRow, onDown }: { it: Item;
       title={`${m.name} · ${tc(itemDur(it), 30, false)}${it.speed !== 1 ? ` · ${it.speed}×` : ""}`}>
       {film && <div className="tl-film">{tiles}</div>}
       {wave && <div className={`tl-wave ${film ? "over" : ""}`} style={ws} />}
-      <span className="tl-name">{m.name}{it.speed !== 1 ? ` · ${it.speed}×` : ""}</span>
+      <span className="tl-name">{it.speed !== 1 ? `${it.speed}× · ` : ""}{it.fx?.look && it.fx.look !== "none" ? "◐ " : ""}{it.enter?.type && it.enter.type !== "none" ? "▸ " : ""}{m.name}</span>
       {it.fade_in > 0 && <em className="tl-fade in" style={{ width: Math.min(w / 2, it.fade_in * pps) }} />}
       {it.fade_out > 0 && <em className="tl-fade out" style={{ width: Math.min(w / 2, it.fade_out * pps) }} />}
       <b className="tl-grip l" /><b className="tl-grip r" />
