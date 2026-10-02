@@ -706,6 +706,25 @@ def _win_loop(rec: Recorder) -> None:
     KEYS = [0x08, 0x09, 0x0D, 0x20, 0x2E] + list(range(0x30, 0x3A)) + list(range(0x41, 0x5B)) + list(range(0xBA, 0xC1)) \
         + list(range(0xDB, 0xDF))
 
+    class GUITHREADINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hwndActive", wintypes.HWND),
+                    ("hwndFocus", wintypes.HWND), ("hwndCapture", wintypes.HWND), ("hwndMenuOwner", wintypes.HWND),
+                    ("hwndMoveSize", wintypes.HWND), ("hwndCaret", wintypes.HWND), ("rcCaret", wintypes.RECT)]
+
+    def caret():
+        """Where the text cursor is on the screen (so the editor can zoom to what is being typed). Many programs
+        tell Windows; browsers and some editors don't, then the editor finds the spot from the picture instead."""
+        try:
+            gi = GUITHREADINFO()
+            gi.cbSize = ctypes.sizeof(GUITHREADINFO)
+            if user32.GetGUIThreadInfo(0, ctypes.byref(gi)) and gi.hwndCaret and (gi.rcCaret.bottom - gi.rcCaret.top) > 0:
+                p2 = wintypes.POINT(gi.rcCaret.left, (gi.rcCaret.top + gi.rcCaret.bottom) // 2)
+                if user32.ClientToScreen(gi.hwndCaret, ctypes.byref(p2)):
+                    return p2.x, p2.y
+        except Exception:
+            pass
+        return None, None
+
     def sampler():
         pt, last = wintypes.POINT(), (None, None)
         btn = {0x01: False, 0x02: False, 0x04: False}
@@ -726,7 +745,8 @@ def _win_loop(rec: Recorder) -> None:
                     any_down = any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in KEYS)
                     if any_down and not keys_down and time.time() - ev.last_key > 0.1:
                         ev.last_key = time.time()
-                        ev.add("key")
+                        cx, cy = caret()
+                        ev.add("key", cx, cy)
                     keys_down = any_down
             except Exception:
                 pass

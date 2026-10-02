@@ -20,6 +20,8 @@ export function VideoEditorPage() {
 function Home() {
   const [list, setList] = useState<Listed[] | null>(null);
   const [busy, setBusy] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const togglePick = (id: string) => setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const load = () => get<Listed[]>("/api/edit/list").then(setList).catch((e) => toast(e.message, "error"));
   useEffect(() => { load(); }, []);
   const open = async () => {
@@ -49,11 +51,16 @@ function Home() {
       {!list && <div className="center grow"><span className="spin big" /></div>}
       {list && list.length > 0 && (
         <>
-          <div className="sec-head"><h2>Projects</h2><span className="muted small">{list.length} saved · every change is saved automatically</span></div>
+          <div className="sec-head"><h2>Projects</h2>
+            <div className="row gap"><span className="muted small">{list.length} saved{picked.size ? ` · ${picked.size} selected` : " · every change is saved automatically"}</span>
+              {list.length > 1 && (picked.size < list.length ? <Btn small kind="ghost" icon="check" onClick={() => setPicked(new Set(list.map((x) => x.id)))}>Select all</Btn> : <Btn small kind="ghost" icon="x" onClick={() => setPicked(new Set())}>Clear selection</Btn>)}
+              {picked.size > 0 && <Btn small kind="danger" icon="trash" onClick={() => { if (confirm(`Delete ${picked.size} project${picked.size > 1 ? "s" : ""}? Your original video files and exported videos stay on your PC.`)) api("/api/edit/delete_many", { ids: [...picked] }).then(() => { setPicked(new Set()); load(); }).catch((e) => toast(e.message, "error")); }}>Delete {picked.size}</Btn>}
+            </div></div>
           <div className="ve-projects">
             {list.map((x) => (
-              <div key={x.id} className="ve-pcard glass-2" onDoubleClick={() => setState({ editProject: x.id })}>
-                <div className="ve-pthumb" onClick={() => setState({ editProject: x.id })}>
+              <div key={x.id} className={`ve-pcard glass-2 ${picked.has(x.id) ? "sel" : ""}`} onDoubleClick={() => setState({ editProject: x.id })}>
+                <div className="ve-pthumb" onClick={() => (picked.size ? togglePick(x.id) : setState({ editProject: x.id }))}>
+                  <button className={`lib-check ${picked.has(x.id) ? "on" : ""}`} title="Select" onClick={(e) => { e.stopPropagation(); togglePick(x.id); }}><Icon name="check" size={13} /></button>
                   {x.poster ? <img src={mediaUrl(x.poster)} alt="" /> : <Icon name="film" size={26} />}
                   <span className="dur">{tc(x.duration, 30, false)}</span>
                 </div>

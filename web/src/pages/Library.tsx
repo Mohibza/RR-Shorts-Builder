@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, get, mediaUrl } from "../lib/api";
 import { go, setState, toast, useStore } from "../lib/store";
 import type { LibItem } from "../lib/types";
@@ -16,6 +16,8 @@ export function LibraryPage() {
   const [open, setOpen] = useState<LibItem | null>(null);
   const [post, setPost] = useState<string[] | null>(null);
   const [sel, setSel] = useState<Set<string>>(new Set());
+  const [kind, setKind] = useState("all");
+  const lastPick = useRef("");
   const load = () => get<LibItem[]>("/api/library").then(setItems).catch((e) => toast(e.message, "error"));
   const [delBusy, setDelBusy] = useState(false);
   const delMany = async (plans: string[]) => {
@@ -31,14 +33,32 @@ export function LibraryPage() {
     setDelBusy(false);
   };
   useEffect(() => { load(); }, [tick]);
-  const list = useMemo(() => (items || []).filter((i) => !q || (i.meta.title || i.hook_text || "").toLowerCase().includes(q.toLowerCase()) || i.source_title.toLowerCase().includes(q.toLowerCase())), [items, q]);
+  const list = useMemo(() => (items || []).filter((i) => (kind === "all" || (i.kind || "short") === kind) && (!q || (i.meta.title || i.hook_text || "").toLowerCase().includes(q.toLowerCase()) || i.source_title.toLowerCase().includes(q.toLowerCase()))), [items, q, kind]);
+  // tick one, Shift+click another: everything between is selected too
+  const pick = (id: string, range: boolean) => {
+    const n = new Set(sel), ids = list.map((i) => i.plan_file), a = ids.indexOf(lastPick.current), b = ids.indexOf(id);
+    if (range && a >= 0 && b >= 0) for (let i = Math.min(a, b); i <= Math.max(a, b); i++) n.add(ids[i]);
+    else if (n.has(id)) n.delete(id); else n.add(id);
+    lastPick.current = id; setSel(n);
+  };
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      const tg = e.target as HTMLElement;
+      if (tg && (tg.tagName === "INPUT" || tg.tagName === "TEXTAREA") || document.querySelector(".modal-back")) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); setSel(new Set(list.map((i) => i.plan_file))); }
+      else if (e.key === "Escape") setSel(new Set());
+      else if (e.key === "Delete" && sel.size) delMany([...sel]);
+    };
+    window.addEventListener("keydown", key); return () => window.removeEventListener("keydown", key);
+  }, [list, sel]);
   if (!items) return <div className="page center"><span className="spin big" /></div>;
   return (
     <div className="page library">
       <div className="page-head">
-        <div><h1>Library</h1><span className="muted">{items.length} finished Shorts</span></div>
+        <div><h1>Library</h1><span className="muted">{items.filter((i) => i.kind !== "video").length} finished Shorts{items.some((i) => i.kind === "video") ? ` · ${items.filter((i) => i.kind === "video").length} edited videos` : ""}{sel.size ? ` · ${sel.size} selected` : ""}</span></div>
         <div className="row gap">
           <div className="search"><Icon name="search" size={16} /><input value={q} placeholder="Search titles" onChange={(e) => setQ(e.target.value)} /></div>
+          {items.some((i) => i.kind === "video") && <div className="seg">{([["all", "All"], ["short", "Shorts"], ["video", "Videos"]] as [string, string][]).map(([k, l]) => <button key={k} className={kind === k ? "on" : ""} onClick={() => setKind(k)}>{l}</button>)}</div>}
           <Btn icon="folder" onClick={() => api("/api/open", { path: "output" })}>Open folder</Btn>
           {items.length > 0 && <div className="lib-sel-bar">
             {sel.size < list.length ? <Btn small kind="ghost" icon="check" onClick={() => setSel(new Set(list.map((i) => i.plan_file)))}>Select all{q ? " shown" : ""}</Btn>
@@ -49,16 +69,17 @@ export function LibraryPage() {
         </div>
       </div>
       {!items.length ? (
-        <Empty icon="film" title="Nothing exported yet" text="Exported Shorts land here, ready to post. Open a video's clips and press Export."><Btn kind="primary" icon="grid" onClick={() => go("projects")}>Go to clips</Btn></Empty>
+        <Empty icon="film" title="Nothing exported yet" text="Exported Shorts and videos from the Editor land here, ready to post. Open a video's clips and press Export."><Btn kind="primary" icon="grid" onClick={() => go("projects")}>Go to clips</Btn></Empty>
       ) : (
         <div className="lib-grid scroll">
           {list.map((it) => (
             <div key={it.plan_file} className={`lib-card glass-2 depth-hover ${sel.has(it.plan_file) ? "sel" : ""}`}>
-              <div className="lib-thumb" onClick={() => setOpen(it)}>
+              <div className={`lib-thumb ${it.kind === "video" ? "wide" : ""}`} onClick={(e) => { if (e.ctrlKey || e.shiftKey || sel.size) pick(it.plan_file, e.shiftKey); else setOpen(it); }}>
                 {it.thumb ? <img src={mediaUrl(it.thumb, it.created)} alt="" loading="lazy" /> : <Icon name="film" />}
                 <span className="dur">{fmt(it.duration)}</span>
                 {it.cover && <span className="cover-badge" title="Has a custom thumbnail"><Icon name="image" size={12} /></span>}
-                <button className={`lib-check ${sel.has(it.plan_file) ? "on" : ""}`} onClick={(e) => { e.stopPropagation(); const n = new Set(sel); n.has(it.plan_file) ? n.delete(it.plan_file) : n.add(it.plan_file); setSel(n); }}><Icon name="check" size={13} /></button>
+                <button className={`lib-check ${sel.has(it.plan_file) ? "on" : ""}`} title="Select (Shift+click selects everything in between)" onClick={(e) => { e.stopPropagation(); pick(it.plan_file, e.shiftKey); }}><Icon name="check" size={13} /></button>
+                {it.kind === "video" && <span className="lib-kind">Video{it.height ? ` · ${it.height}p` : ""}</span>}
                 <div className="hover-hint"><Icon name="play" size={22} /></div>
               </div>
               <div className="lib-body">
@@ -67,7 +88,8 @@ export function LibraryPage() {
                 <div className="row gap">
                   <Btn small kind="primary" icon="rocket" onClick={() => setPost([it.plan_file])}>Post</Btn>
                   {it.project_ref && <IconBtn icon="edit" title="Edit again" onClick={() => setState({ editing: { project: it.project_ref!.project, clip: it.project_ref!.clip } })} />}
-                  <IconBtn icon="timeline" title="Open in the video editor" onClick={() => api<{ id: string }>("/api/edit/new", { paths: [it.output] }).then((q) => setState({ page: "edit", editProject: q.id })).catch((e) => toast(e.message, "error"))} />
+                  {it.kind === "video" && it.edit_project && <IconBtn icon="edit" title="Edit again (opens its project)" onClick={() => setState({ page: "edit", editProject: it.edit_project! })} />}
+                  <IconBtn icon="timeline" title="Open in the video editor as a new project" onClick={() => api<{ id: string }>("/api/edit/new", { paths: [it.output] }).then((q) => setState({ page: "edit", editProject: q.id })).catch((e) => toast(e.message, "error"))} />
                   <IconBtn icon="folder" title="Show file" onClick={() => api("/api/open", { path: it.output, select: true })} />
                   <IconBtn icon="trash" danger title="Delete this Short" onClick={() => delMany([it.plan_file])} />
                 </div>

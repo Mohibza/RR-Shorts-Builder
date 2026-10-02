@@ -594,6 +594,18 @@ def _make_handler(app: App):
     def library(_a):
         from .pipeline import load_library
         s = Settings.load()
+        edited = usable_output_dir(s.output_dir)[0] / "Edited videos"
+        if edited.is_dir():                       # videos exported from the editor before they were listed here
+            from . import veditor
+            from .utils import probe
+            for f in edited.glob("*.mp4"):
+                if not Path(str(f)[:-4] + ".sf.json").exists():
+                    try:
+                        info = probe(str(f))
+                        veditor.register_export({"id": "", "name": f.stem}, f, float(info.get("duration") or 0),
+                                                int(info.get("width") or 0), int(info.get("height") or 0))
+                    except Exception:
+                        pass
         items = load_library(str(usable_output_dir(s.output_dir)[0]))
         seen = {i["plan_file"] for i in items}
         for p in projects.list_all():          # Shorts saved to older output folders
@@ -609,6 +621,8 @@ def _make_handler(app: App):
                         "source_title": d.get("source_title", ""), "created": d.get("created", 0),
                         "duration": (d.get("prep") or {}).get("D", 0), "project_ref": d.get("project_ref"),
                         "style": d.get("style") or {}, "hook_text": d.get("hook_text", ""),
+                        "kind": d.get("kind") or "short", "edit_project": d.get("edit_project") or "",
+                        "width": d.get("width") or 0, "height": d.get("height") or 0,
                         "cover": d.get("cover") if d.get("cover") and Path(d["cover"]).exists() else "",
                         "cover_info": d.get("cover_info") or {}})
         out.sort(key=lambda d: d["created"], reverse=True)
@@ -816,6 +830,20 @@ def _make_handler(app: App):
         from . import veditor
         veditor.delete(str(a["id"]))
         return True
+
+    def edit_delete_many(a):
+        from . import veditor
+        ids = [str(x) for x in a.get("ids") or []]
+        for x in ids:
+            veditor.delete(x)
+        return {"deleted": len(ids)}
+
+    def rec_delete_many(a):
+        from . import recsetup
+        ids = [str(x) for x in a.get("ids") or []]
+        for x in ids:
+            recsetup.delete(x)
+        return {"deleted": len(ids)}
 
     def edit_import(a):
         from . import veditor
@@ -1519,6 +1547,8 @@ def _make_handler(app: App):
         ("GET", "/api/edit/project"): edit_get,
         ("POST", "/api/edit/save"): edit_save,
         ("POST", "/api/edit/delete"): edit_delete,
+        ("POST", "/api/edit/delete_many"): edit_delete_many,
+        ("POST", "/api/record/delete_many"): rec_delete_many,
         ("POST", "/api/edit/import"): edit_import,
         ("GET", "/api/edit/assets"): edit_assets,
         ("POST", "/api/edit/auto"): edit_auto,

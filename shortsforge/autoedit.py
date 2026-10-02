@@ -161,49 +161,125 @@ def _captions(words: list[dict], maxchars: int = 44, maxdur: float = 3.6) -> lis
     return res
 
 
-def _zoom_blocks(clicks: list, keys: list, moves: list, z: float) -> list[dict]:
-    """Zoom blocks (timeline time) from where the clicking and typing happened."""
-    pts = [(t, x, y) for t, x, y in clicks]
-    # typing with no click nearby: zoom to where the cursor was resting
-    last = -10.0
-    for t in keys:
-        if t - last > 2.5 and not any(abs(t - c[0]) < 2.0 for c in pts):
-            pos = next(((m[1], m[2]) for m in reversed(moves) if m[0] <= t), None)
-            if pos:
-                pts.append((t, pos[0], pos[1]))
-        last = t
-    pts.sort()
-    blocks: list[list] = []
-    for t, x, y in pts:
+def _typing_spots(video: str, bursts: list[tuple[float, float]], moves: list, carets: list,
+                  progress: Optional[Callable[[str, float], None]] = None, cancel=None) -> list[list]:
+    """Where on the screen the text appears while typing: for every burst (video time), a list of [t, x, y].
+
+    The recorder logs when keys go down, not what or where. So this LOOKS at the picture: during typing, the small
+    area that keeps changing is the text being written. (Recordings that logged the text cursor use that directly.)
+    A spot with x = None means "typing here, place unknown"."""
+    out: list[list] = []
+    cap = None
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        cv2 = None                                            # type: ignore[assignment]
+
+    def frame(t: float):
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
+        ok, fr = cap.read()
+        if not ok or fr is None:
+            return None
+        h, w = fr.shape[:2]
+        g = cv2.cvtColor(cv2.resize(fr, (480, max(2, int(480 * h / w))), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+        return cv2.GaussianBlur(g, (3, 3), 0)
+
+    def mouse_at(t: float):
+        last = None
+        for m in moves:
+            if m[0] > t:
+                break
+            last = m
+        return last
+
+    for bi, (s0, s1) in enumerate(bursts):
+        if cancel is not None and cancel.is_set():
+            break
+        if progress:
+            progress("Finding where you typed", 0.74 + 0.1 * bi / max(1, len(bursts)))
+        n = max(1, min(40, int((s1 - s0) / 1.2) + 1))
+        times = [s0 + (s1 - s0) * i / n for i in range(n)] + [s1]
+        spots: list[list] = []
+        known = [c for c in carets if s0 - 0.5 <= c[0] <= s1 + 0.5 and 0 <= c[1] <= 1 and 0 <= c[2] <= 1]
+        for t in times:
+            near = [c for c in known if abs(c[0] - t) <= 1.0]
+            if near:                                          # the recorder saw the text cursor: exact
+                near.sort(key=lambda c: abs(c[0] - t))
+                spots.append([t, near[0][1], near[0][2]])
+                continue
+            pos = None
+            if cv2 is not None:
+                try:
+                    if cap is None:
+                        cap = cv2.VideoCapture(video)
+                    a, b = frame(t - 0.15), frame(min(s1 + 0.6, t + 0.9))
+                    if a is not None and b is not None and a.shape == b.shape:
+                        d = (cv2.absdiff(a, b) > 22).astype(np.uint8)
+                        mo = mouse_at(t + 0.4)
+                        if mo is not None:                    # the moving mouse is not the typing
+                            cv2.circle(d, (int(mo[1] * d.shape[1]), int(mo[2] * d.shape[0])), int(0.07 * d.shape[1]), 0, -1)
+                        d = cv2.morphologyEx(d, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+                        cnt = int(d.sum())
+                        if 5 <= cnt <= 0.05 * d.size:          # a small change = text; a big one = scrolling / new window
+                            ys, xs = np.nonzero(d)
+                            pos = (float(np.median(xs)) / d.shape[1], float(np.median(ys)) / d.shape[0])
+                except Exception:
+                    pos = None
+            spots.append([t, pos[0], pos[1]] if pos else [t, None, None])
+        # one stray reading must not throw the camera across the screen: smooth with the neighbours' median
+        good = [sp for sp in spots if sp[1] is not None]
+        if good:
+            for sp in spots:
+                near = sorted(good, key=lambda g: abs(g[0] - sp[0]))[:3]
+                sp[1] = sorted(g[1] for g in near)[len(near) // 2]
+                sp[2] = sorted(g[2] for g in near)[len(near) // 2]
+        out.append(spots)
+    if cap is not None:
+        cap.release()
+    return out
+
+
+def _zoom_blocks(targets: list, z: float) -> list[dict]:
+    """Zoom blocks from targets [t, x, y, kind] (timeline time; kind 'click' or 'type'; x None = keep the place).
+
+    The camera goes to a click. When typing starts somewhere that is not inside the zoomed view, it glides over to
+    the text; if the text is already in view it stays put. It holds for as long as the typing goes on."""
+    half = 0.5 / z
+    lo, hi = half, 1 - half
+    blocks: list[dict] = []
+    cur: Optional[dict] = None
+    for t, x, y, kind in sorted(targets, key=lambda q: q[0]):
+        live = cur is not None and t - cur["last"] <= 4.0
+        if x is None:
+            if live:
+                cur["last"], cur["kind"] = t, kind          # still typing: keep holding
+            continue
         if not (0 <= x <= 1 and 0 <= y <= 1):
             continue
-        b = blocks[-1] if blocks else None
-        if b and t - b[-1][0] <= 4.0 and abs(x - b[0][1]) < 0.22 and abs(y - b[0][2]) < 0.26:
-            b.append((t, x, y))
-        else:
-            blocks.append([(t, x, y)])
-    out, prev_end = [], 0.0
-    lo, hi = 0.5 / z, 1 - 0.5 / z
-    ks = sorted(keys)
-    for i, b in enumerate(blocks):
-        start = max(prev_end, b[0][0] - 0.7)
-        # hold the zoom for as long as the typing goes on: follow the key presses until they stop for 2.5 s
-        last = b[-1][0]
-        for k in ks:
-            if k > last + 2.5:
-                break
-            if k > last:
-                last = k
-        end = last + 1.5
-        if i + 1 < len(blocks):                               # but hand over to the next spot when a click goes elsewhere
-            end = min(end, max(b[-1][0] + 1.0, blocks[i + 1][0][0] - 0.7))
-        if end - start < 1.2:
+        # is the new spot comfortably inside what the zoom shows right now?
+        if live and abs(x - cur["cx"]) <= half * 0.72 and abs(y - cur["cy"]) <= half * 0.72:
+            cur["last"], cur["kind"] = t, kind
             continue
-        cx = min(hi, max(lo, sum(q[1] for q in b) / len(b)))
-        cy = min(hi, max(lo, sum(q[2] for q in b) / len(b)))
-        out.append({"id": _nid(), "kind": "zoom", "start": round(start, 2), "dur": round(end - start, 2), "cx": round(cx, 3),
-                    "cy": round(cy, 3), "z": z, "ease": 0.55, "auto": True})
-        prev_end = end
+        nb = {"cx": min(hi, max(lo, x)), "cy": min(hi, max(lo, y)), "last": t, "kind": kind}
+        if live:                                              # glide straight from the old spot to the new one
+            cur["end"] = max(cur["start"] + 0.5, t - 0.6)
+            nb["start"] = cur["end"]
+        else:
+            if cur is not None:
+                cur["end"] = cur["last"] + (1.5 if cur["kind"] == "type" else 1.7)
+            nb["start"] = max(cur["end"] if cur else 0.0, t - 0.7)
+        blocks.append(nb)
+        cur = nb
+    if cur is not None:
+        cur["end"] = cur["last"] + (1.5 if cur["kind"] == "type" else 1.7)
+    out = []
+    for i, b in enumerate(blocks):
+        chained = i + 1 < len(blocks) and abs(blocks[i + 1]["start"] - b["end"]) < 0.01
+        if b["end"] - b["start"] < (0.5 if chained else 1.2):
+            continue
+        out.append({"id": _nid(), "kind": "zoom", "start": round(b["start"], 2), "dur": round(b["end"] - b["start"], 2),
+                    "cx": round(b["cx"], 3), "cy": round(b["cy"], 3), "z": z, "ease": 0.55, "auto": True})
     return out
 
 
@@ -369,7 +445,17 @@ def run(p: dict, opts: dict, progress: Callable[[str, float], None], cancel: Opt
     summary = {"cuts": sum(1 for x in actions if x["kind"] == "cut"), "speedups": sum(1 for x in actions if x["kind"] == "speed"),
                "zooms": 0, "captions": 0, "chapters": 0, "voice": has_voice, "events": have_events}
     if o["zoom"] and have_events:
-        zs = _zoom_blocks(clicks, keys, moves, float(o["zoom_level"]))
+        # typing: from the first key to the last (pauses up to 2.5 s belong to the same burst), in video time
+        bursts = [b for b in _merge([(k, k + 0.01) for k in ev["keys"]], 2.5)
+                  if b[1] - b[0] >= 0.4 and to_tl(b[0]) is not None]
+        spots = _typing_spots(m["path"], bursts, ev["moves"], ev.get("carets") or [], progress, cancel) if m["kind"] == "video" else []
+        targets = [[c[0], c[1], c[2], "click"] for c in clicks]
+        for burst in spots:
+            for t_src, x, y in burst:
+                tt = to_tl(t_src)
+                if tt is not None:
+                    targets.append([tt, x, y, "type"])
+        zs = _zoom_blocks(targets, float(o["zoom_level"]))
         dead = [(x["t0"], x["t1"]) for x in actions if x["kind"] == "cut"]
         zs = [z for z in zs if not any(a <= z["start"] + 0.7 and z["start"] + z["dur"] - 1.7 <= b for a, b in dead)]
         p["els"] += zs
@@ -406,7 +492,7 @@ def run(p: dict, opts: dict, progress: Callable[[str, float], None], cancel: Opt
     # ---- 5. cut it
     progress("Cutting the timeline", 0.92)
     p = apply_actions(p, actions, fps)
-    p["els"] = [e for e in p["els"] if not (e.get("auto") and e["kind"] == "zoom" and e["dur"] < 1.2)]
+    p["els"] = [e for e in p["els"] if not (e.get("auto") and e["kind"] == "zoom" and e["dur"] < 0.6)]
     summary["zooms"] = sum(1 for e in p["els"] if e.get("auto") and e["kind"] == "zoom")
     after = max([it["start"] + (it["out"] - it["in"]) / max(0.05, it.get("speed") or 1) for it in p["items"]] or [0.0])
     summary.update(before=round(before, 1), after=round(after, 1), saved=round(before - after, 1))

@@ -65,6 +65,8 @@ export function StudioPage() {
   const [count, setCount] = useState<number | null>(null);
   const [name, setName] = useState("");
   const [play, setPlay] = useState<Session | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const togglePick = (id: string) => setPicked((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const set = (patch: Record<string, any>) => saveSettings(patch).catch((e) => toast(e.message, "error"));
   const src = s.rec_source || { kind: "screen", monitor: 0 };
   const hk: Record<string, string> = { ...(dev?.defaults || {}), ...(s.rec_hotkeys || {}) };
@@ -153,11 +155,16 @@ export function StudioPage() {
           {dev && !dev.windows_os && <p className="muted small">Screen recording works on Windows.</p>}
         </section>
       </div>
-      <div className="sec-head rec-list-head"><h2>Recordings</h2><span className="muted small">{list ? `${list.length} saved` : ""}</span></div>
+      <div className="sec-head rec-list-head"><h2>Recordings</h2>
+        <div className="row gap"><span className="muted small">{list ? `${list.length} saved${picked.size ? ` · ${picked.size} selected` : ""}` : ""}</span>
+          {(list?.length || 0) > 1 && (picked.size < (list?.length || 0) ? <Btn small kind="ghost" icon="check" onClick={() => setPicked(new Set((list || []).map((x) => x.id)))}>Select all</Btn> : <Btn small kind="ghost" icon="x" onClick={() => setPicked(new Set())}>Clear selection</Btn>)}
+          {picked.size > 0 && <Btn small kind="danger" icon="trash" onClick={() => { if (confirm(`Delete ${picked.size} recording${picked.size > 1 ? "s" : ""} from your computer?`)) api("/api/record/delete_many", { ids: [...picked] }).then(() => { setPicked(new Set()); load(); }).catch((e) => toast(e.message, "error")); }}>Delete {picked.size}</Btn>}
+        </div></div>
       <div className="rec-list">
         {list && !list.length && <p className="muted">No recordings yet. Your recordings appear here, safe even if the PC crashes mid-recording.</p>}
         {(list || []).map((r) => (
-          <div key={r.id} className={`rec-card glass-2 ${r.state === "failed" ? "bad" : ""}`}>
+          <div key={r.id} className={`rec-card glass-2 ${r.state === "failed" ? "bad" : ""} ${picked.has(r.id) ? "sel" : ""}`}>
+            <button className={`lib-check ${picked.has(r.id) ? "on" : ""}`} title="Select" onClick={() => togglePick(r.id)}><Icon name="check" size={13} /></button>
             <div className="rec-thumb" onClick={() => r.video && setPlay(r)}>{r.poster ? <img src={mediaUrl(r.poster, r.created)} alt="" /> : <Icon name="film" />}{r.duration > 0 && <span className="dur">{fmt(r.duration)}</span>}</div>
             <div className="rec-body">
               <b>{r.name || `Recording ${new Date(r.created * 1000).toLocaleString()}`}</b>

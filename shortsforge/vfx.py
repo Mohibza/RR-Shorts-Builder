@@ -468,6 +468,8 @@ def load_events(path: str, offset: float = 0.0) -> dict:
             last = t
         elif k == "key":
             out["keys"].append(t)
+            if "x" in e:                                   # where the text cursor was (when the program tells Windows)
+                out.setdefault("carets", []).append([t, e["x"], e["y"]])
     return out
 
 

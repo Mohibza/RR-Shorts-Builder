@@ -688,6 +688,11 @@ def export(pid: str, out_dir: Path, opts: dict, emit: Callable, encoder: str = "
                 tell()
         try:
             run_ffmpeg(args, D, prog, cancel, ffmpeg_cwd())
+            try:
+                register_export(p, out, D, W, H)
+                emit("library", {})
+            except Exception:
+                pass                                  # the video itself is fine; it just isn't listed
             job.update(state="done", frac=1.0)
         except Cancelled:
             job.update(state="cancelled")
@@ -700,6 +705,27 @@ def export(pid: str, out_dir: Path, opts: dict, emit: Callable, encoder: str = "
     threading.Thread(target=work, daemon=True).start()
     tell()
     return job
+
+
+def register_export(p: dict, out: Path, D: float, W: int, H: int) -> None:
+    """Put an exported video into the Library: a small details file next to it (title, description with the
+    chapters, a poster), the same kind the Shorts get, so it can be played, posted and deleted from there."""
+    thumb = out.with_suffix(".jpg")
+    run([find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{min(3.0, D / 3):.2f}", "-i", str(out),
+         "-frames:v", "1", "-vf", "scale=640:-2", "-q:v", "4", str(thumb)], timeout=60)
+    chapters = p.get("chapters") or []
+    body = ""
+    if len(chapters) > 1:
+        def stamp(t: float) -> str:
+            t = int(t)
+            return f"{t // 3600}:{t % 3600 // 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+        body = "\n".join(f"{stamp(c['t'])} {c['title']}" for c in chapters)
+    plan = {"kind": "video", "output": str(out), "thumb": str(thumb) if thumb.exists() else "", "created": time.time(),
+            "source": "", "source_title": "Video editor", "hook_text": p.get("name") or out.stem,
+            "meta": {"title": p.get("name") or out.stem, "body": body, "description": body, "tags": [], "hashtags": []},
+            "prep": {"D": round(D, 2)}, "project_ref": None, "style": {}, "edit_project": p["id"],
+            "width": W, "height": H}
+    Path(str(out)[:-4] + ".sf.json").write_text(json.dumps(plan, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def cancel_export(eid: str) -> None:

@@ -1447,7 +1447,8 @@ def save_meta(plan_file: str, title: str, body: str, tags: list, hashtags: Optio
     m["tags"] = [t.strip() for t in tags if t.strip()]
     if hashtags is not None:
         m["hashtags"] = hashtags
-    m["description"] = metadata.compose({"description": m["body"], "hashtags": m.get("hashtags") or ["#shorts"]},
+    default_tags = [] if data.get("kind") == "video" else ["#shorts"]        # a long video isn't a Short
+    m["description"] = metadata.compose({"description": m["body"], "hashtags": m.get("hashtags") or default_tags},
                                         data.get("source", ""), m.get("credit", ""))
     data["meta"] = m
     Path(plan_file).write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
