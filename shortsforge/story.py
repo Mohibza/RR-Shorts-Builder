@@ -173,7 +173,7 @@ def _best_word(toks: list[str], keywords: set) -> int:
 def plan(words: list, D: float, pieces: list, vibe: str, seed: int, title: str, keywords: list,
          lang: str, layout: str, opts: dict, cold_open: bool, watermark: str = "", accent: str = "#FFE400",
          seams: Optional[list] = None, fps: int = 30, head_top: Optional[float] = None,
-         head_exact: bool = False) -> dict:
+         head_exact: bool = False, place: Optional[dict] = None) -> dict:
     """The Story FX plan for one Short. words/pieces/seams are in the pre (cut) timeline."""
     level = opts.get("level", "auto")
     empty = {"level": "off", "freezes": [], "title": None, "beats": [], "streaks": [], "leaks": [],
@@ -254,12 +254,15 @@ def plan(words: list, D: float, pieces: list, vibe: str, seed: int, title: str, 
             if els:
                 tl = {"t0": 0.1, "t1": t1, "look": look, "y": ty, "els": els}
 
+    if tl:      # dragged / resized in the editor
+        _move(tl["els"], place, "title")
     # 3) beat text (what lands on screen while the picture is frozen)
     beats = []
     if opts.get("titles", True):
         for f, (a, b) in zip(freezes, spans):
             els = _beat_els(f, words, a, b, kw, roman, look, ty, accent)
             if els:
+                _move(els, place, "beat")
                 beats.append({"t0": a, "t1": b, "els": els})
 
     # 4) streak transitions: every part join, every beat's snap back, the title leaving
@@ -292,6 +295,27 @@ def plan(words: list, D: float, pieces: list, vibe: str, seed: int, title: str, 
     return {"level": level, "freezes": [{"t": f["t"], "d": f["d"], "kind": f["kind"]} for f in freezes],
             "spans": spans, "title": tl, "beats": beats, "streaks": streaks, "leaks": [round(x, 2) for x in leaks],
             "texture": tex, "behind": bool(tl and behind_ok), "blackouts": spans, "D": round(Df, 3)}
+
+
+def _move(els: list, place: Optional[dict], key: str) -> None:
+    """Apply the editor's drag (key_dx / key_dy, fractions of the frame) and resize (key_scale) to a text group.
+    The group moves and scales as one, around its biggest element."""
+    p = place or {}
+    try:
+        dx, dy = float(p.get(f"{key}_dx") or 0) * W, float(p.get(f"{key}_dy") or 0) * H
+        sc = min(2.0, max(0.4, float(p.get(f"{key}_scale") or 1.0)))
+    except (TypeError, ValueError):
+        return
+    if not els or (abs(dx) < 0.5 and abs(dy) < 0.5 and abs(sc - 1) < 0.01):
+        return
+    a = max(els, key=lambda e: e["size"])
+    ax, ay = a["x"], a["y"]
+    for e in els:
+        e["x"] = int(round(ax + (e["x"] - ax) * sc + dx))
+        e["y"] = int(round(ay + (e["y"] - ay) * sc + dy))
+        e["size"] = max(12, int(round(e["size"] * sc)))
+        if e.get("wipe"):
+            e["wipe"] = [int(round(ax + (w - ax) * sc + dx)) for w in e["wipe"]]
 
 
 def _el(text, font, size, x, y, an, t0, t1, anim, color="#FFFFFF", **kw) -> dict:

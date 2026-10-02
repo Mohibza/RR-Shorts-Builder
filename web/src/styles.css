@@ -657,3 +657,30 @@ code.devid { font-size: 1.05em; letter-spacing: .06em; padding: 8px 12px; border
 .ref-chip .x { background: none; border: 0; color: inherit; cursor: pointer; display: inline-flex; padding: 2px; }
 .cover-badge { position: absolute; left: 8px; bottom: 8px; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 7px;
   background: rgba(139,123,255,.9); color: #fff; }
+
+/* ---------------- draggable text on the preview */
+.overlay .draggable { pointer-events: auto; cursor: move; touch-action: none; user-select: none; }
+.overlay .draggable:hover { outline: 1.5px dashed rgba(255,255,255,.75); outline-offset: 6px; border-radius: 4px; }
+.drag-hint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 11px; margin-bottom: 10px; border-radius: 10px; font-size: 12.5px;
+  background: rgba(139,123,255,.1); border: 1px solid rgba(139,123,255,.35); }
+.drag-hint span { flex: 1; min-width: 180px; }
+
+/* ---------------- thumbnail designer */
+.td { display: flex; gap: 18px; align-items: flex-start; }
+.td-stage { flex: none; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.td-canvas { position: relative; border-radius: 10px; overflow: hidden; background: #111; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+.td-canvas canvas { display: block; cursor: move; touch-action: none; }
+.td-load { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0,0,0,.4); }
+.td-under { justify-content: center; align-items: center; }
+.td-at { display: flex; align-items: center; gap: 8px; min-width: 190px; }
+.td-at .slider { flex: 1; }
+.td-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.td-tabs { align-self: flex-start; flex-wrap: wrap; }
+.td-body { max-height: 62vh; display: grid; gap: 10px; padding-right: 6px; align-content: start; }
+.td-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.td-colors { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.td-sw { width: 24px; height: 24px; border-radius: 7px; border: 2px solid rgba(255,255,255,.18); cursor: pointer; padding: 0; color: #fff; font-size: 12px; background: transparent; }
+.td-sw.on { border-color: #8b7bff; box-shadow: 0 0 0 2px rgba(139,123,255,.5); }
+.td-colors input[type=color] { width: 30px; height: 26px; padding: 0; border: 0; background: none; cursor: pointer; }
+.td-emoji { display: flex; flex-wrap: wrap; gap: 4px; }
+.td-emoji button { font-size: 22px; background: var(--glass); border: 1px solid var(--line); border-radius: 9px; width: 40px; height: 40px; cursor: pointer; }

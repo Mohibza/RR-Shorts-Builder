@@ -368,3 +368,166 @@ def generate_frame(title: str, aspect: str, frame: str, out_jpg: str, accent: st
 
 def story_esc(text: str) -> str:
     return text.replace("\\", "/").replace("{", "(").replace("}", ")").replace("\n", " ")
+
+
+# ------------------------------------------------------------------ built-in designer (free, offline, no watermark)
+def cutout_png(frame_jpg: str, out_png: str) -> Optional[list]:
+    """The speaker cut out of the frame as a transparent PNG (same size as the frame).
+    Returns the speaker's box [x, y, w, h] as fractions of the frame, or None when nobody is clearly in it."""
+    import cv2
+    import numpy as np
+    from . import cutout
+    if not cutout.available():
+        return None
+    img = cv2.imread(frame_jpg, cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    k = 640 / max(h, w)
+    small = cv2.resize(img, (max(16, int(w * k)), max(16, int(h * k))), interpolation=cv2.INTER_AREA)
+    m = cutout._refine(cutout.segment(small[:, :, ::-1].copy()))
+    if not cutout.person_like(m):
+        return None
+    # second pass, zoomed in on the person: the model sees them much larger, so hair and shoulders come out clean
+    ys, xs = np.where(m > 0.5)
+    sx, sy = w / m.shape[1], h / m.shape[0]
+    bx0, bx1, by0, by1 = xs.min() * sx, xs.max() * sx, ys.min() * sy, ys.max() * sy
+    px, py = (bx1 - bx0) * 0.18, (by1 - by0) * 0.12
+    x0, x1 = int(max(0, bx0 - px)), int(min(w, bx1 + px))
+    y0, y1 = int(max(0, by0 - py)), int(min(h, by1 + py))
+    a = np.zeros((h, w), np.float32)
+    crop = img[y0:y1, x0:x1]
+    if crop.shape[0] > 40 and crop.shape[1] > 40:
+        kc = 640 / max(crop.shape[:2])
+        cs = cv2.resize(crop, (max(16, int(crop.shape[1] * kc)), max(16, int(crop.shape[0] * kc))),
+                        interpolation=cv2.INTER_AREA)
+        m2 = cutout.segment(cs[:, :, ::-1].copy())
+        m2 = cv2.resize(m2, (x1 - x0, y1 - y0), interpolation=cv2.INTER_CUBIC)
+        coarse = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)[y0:y1, x0:x1]
+        coarse_raw = coarse.copy()
+        coarse = cv2.dilate(coarse, np.ones((1, 1), np.uint8) if w < 200 else np.ones((max(3, w // 40), max(3, w // 40)), np.uint8))
+        # fine detail from the zoomed pass, but never lose something the first pass was sure about (dark hats, hair)
+        a[y0:y1, x0:x1] = np.maximum(m2 * (coarse > 0.15), 0.72 * coarse_raw + 0.28 * m2)
+    else:
+        a = cv2.resize(m, (w, h), interpolation=cv2.INTER_CUBIC)
+    a = np.clip((a - 0.45) / 0.3, 0.0, 1.0)
+    a = cv2.erode(a, np.ones((3, 3), np.uint8), iterations=max(1, w // 700))
+    a = cv2.GaussianBlur(a, (0, 0), max(1.0, w / 800))
+    ys, xs = np.where(a > 0.5)
+    if len(xs) < 50:
+        return None
+    rgba = np.dstack([img, (a * 255).astype(np.uint8)])
+    Path(out_png).parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(out_png, rgba)
+    return [round(float(xs.min()) / w, 4), round(float(ys.min()) / h, 4),
+            round(float(xs.max() - xs.min()) / w, 4), round(float(ys.max() - ys.min()) / h, 4)]
+
+
+def _hex(bgr) -> str:
+    b, g, r = [int(max(0, min(255, round(float(v))))) for v in bgr]
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def analyze_reference(path: str) -> dict:
+    """What makes the reference look the way it does, so the designer can rebuild it with the user's own speaker
+    and words: the colour palette, where the headline sits (and its colours), where the subject sits."""
+    import cv2
+    import numpy as np
+    from . import cutout
+    img = cv2.imread(path, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ThumbError("That reference image couldn't be read.")
+    H0, W0 = img.shape[:2]
+    k = 480 / max(H0, W0)
+    im = cv2.resize(img, (max(16, int(W0 * k)), max(16, int(H0 * k))), interpolation=cv2.INTER_AREA)
+    h, w = im.shape[:2]
+    # palette: 6 dominant colours, biggest first
+    px = im.reshape(-1, 3).astype(np.float32)
+    crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+    _c, labels, centers = cv2.kmeans(px, 6, None, crit, 3, cv2.KMEANS_PP_CENTERS)
+    counts = np.bincount(labels.ravel(), minlength=6)
+    order = np.argsort(-counts)
+    palette = [_hex(centers[i]) for i in order]
+    hsv = cv2.cvtColor(centers.reshape(1, -1, 3).astype(np.uint8), cv2.COLOR_BGR2HSV)[0]
+    vivid = max(range(6), key=lambda i: float(hsv[i][1]) * (0.4 + float(hsv[i][2]) / 255) * (1 if counts[i] > 0.01 * len(px) else 0.2))
+    dark = float(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).mean()) < 110
+    # subject
+    subject = None
+    try:
+        if cutout.available():
+            m = cutout._refine(cutout.segment(im[:, :, ::-1].copy()))
+            b = m > 0.5
+            if 0.04 <= b.mean() <= 0.75:
+                ys, xs = np.where(b)
+                subject = [round(float(xs.min()) / w, 3), round(float(ys.min()) / h, 3),
+                           round(float(xs.max() - xs.min()) / w, 3), round(float(ys.max() - ys.min()) / h, 3)]
+    except Exception:
+        subject = None
+    # headline: wide bands of dense, strong edges (letters), outside the subject's middle
+    gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 90, 200)
+    band = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (max(9, w // 22), max(3, h // 90))))
+    band = cv2.morphologyEx(band, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (max(5, w // 40), max(3, h // 120))))
+    cnts, _h = cv2.findContours(band, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    sx0 = sy0 = sx1 = sy1 = 0
+    if subject:
+        sx0, sy0 = subject[0] * w, subject[1] * h
+        sx1, sy1 = sx0 + subject[2] * w, sy0 + subject[3] * h
+    for c in cnts:
+        x, y, bw, bh = cv2.boundingRect(c)
+        if bw < w * 0.18 or bh < h * 0.025 or bh > h * 0.3 or bw / max(bh, 1) < 1.3:
+            continue
+        dens = float(edges[y:y + bh, x:x + bw].mean()) / 255
+        if dens < 0.06:
+            continue
+        if subject:      # mostly on top of the subject: that's the person, not a headline
+            ox = max(0.0, min(x + bw, sx1) - max(x, sx0)) * max(0.0, min(y + bh, sy1) - max(y, sy0))
+            if ox > 0.55 * bw * bh:
+                continue
+        # letters are two flat colours far apart; foliage and faces are not
+        g = gray[y:y + bh, x:x + bw]
+        lo, hi = np.percentile(g, 12), np.percentile(g, 88)
+        contrast = float(hi - lo)
+        if contrast < 70:
+            continue
+        boxes.append((bw * bh * dens * (contrast / 255) ** 2, x, y, bw, bh))
+    text = None
+    if boxes:
+        boxes.sort(reverse=True)
+        _s, x, y, bw, bh = boxes[0]
+        x0, y0, x1, y1 = x, y, x + bw, y + bh
+        for _s2, xx, yy, ww, hh in boxes[1:4]:       # other lines of the same headline: close above/below, overlapping
+            gap = max(yy - y1, y0 - (yy + hh))
+            if gap < 0.7 * bh and min(x1, xx + ww) - max(x0, xx) > 0.3 * min(bw, ww) and hh < bh * 2.2:
+                x0, y0, x1, y1 = min(x0, xx), min(y0, yy), max(x1, xx + ww), max(y1, yy + hh)
+        roi = im[y0:y1, x0:x1].reshape(-1, 3).astype(np.float32)
+        tcol, tstroke = "#FFFFFF", "#000000"
+        if len(roi) > 20:
+            _c2, l2, c2 = cv2.kmeans(roi, 2, None, crit, 3, cv2.KMEANS_PP_CENTERS)
+            n2 = np.bincount(l2.ravel(), minlength=2)
+            lum = [0.114 * c2[i][0] + 0.587 * c2[i][1] + 0.299 * c2[i][2] for i in (0, 1)]
+            sat = [float(max(c2[i]) - min(c2[i])) for i in (0, 1)]
+            # letters: the brighter / more colourful of the two, unless it clearly dominates the box (then it's the plate)
+            ti = max((0, 1), key=lambda i: lum[i] + sat[i] * 0.8)
+            if n2[ti] > 0.72 * len(roi):
+                ti = 1 - ti
+            tcol, tstroke = _hex(c2[ti]), _hex(c2[1 - ti])
+        cxf = (x0 + x1) / 2 / w
+        text = {"x": round(float(cxf), 3), "y": round(float(y0 + y1) / 2 / h, 3), "w": round(float(x1 - x0) / w, 3),
+                "h": round(float(y1 - y0) / h, 3), "align": "left" if cxf < 0.4 else ("right" if cxf > 0.6 else "center"),
+                "color": tcol, "stroke": tstroke}
+    return {"palette": palette, "accent": _hex(centers[vivid]), "dark": bool(dark), "subject": subject, "text": text,
+            "aspect": round(float(W0) / H0, 3)}
+
+
+def save_design(image_b64: str, aspect: str, out_jpg: str) -> str:
+    """Save the thumbnail the designer drew (a JPEG/PNG data URL) at exactly the thumbnail size."""
+    raw = image_b64.split(",", 1)[1] if image_b64.startswith("data:") else image_b64
+    try:
+        data = base64.b64decode(raw)
+    except Exception:
+        raise ThumbError("The thumbnail image was damaged on the way. Try saving again.")
+    if len(data) > 25 * 1024 * 1024:
+        raise ThumbError("That thumbnail is too large.")
+    return fit(data, aspect, out_jpg)

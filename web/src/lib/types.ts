@@ -3,6 +3,10 @@ export type Word = { w: string; s: number; e: number };
 export type Place = {
   cap_y?: number; cap_scale?: number; hook_y?: number; hook_scale?: number; hook_dur?: number; cta_y?: number;
   wm_pos?: string; wm_scale?: number; frame_x?: number; frame_y?: number; frame_zoom?: number;
+  // text dragged in the editor: centre x as a fraction of the width (captions, hook, end card) and the
+  // story title / beat text group offset (fractions of the frame) + size
+  cap_x?: number; hook_x?: number; cta_x?: number;
+  title_dx?: number; title_dy?: number; title_scale?: number; beat_dx?: number; beat_dy?: number; beat_scale?: number;
 };
 
 export type Style = {

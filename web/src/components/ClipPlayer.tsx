@@ -20,6 +20,7 @@ type Props = {
   onTime?: (T: number, D: number) => void; className?: string; fill?: boolean;
   withAudio?: boolean;   // editor: play the sound effects + music under the voice, like the export
   onPlan?: (plan: FxPlan) => void;
+  onPlace?: (patch: Place) => void;   // editor: text on the video can be dragged (and resized with the wheel)
 };
 
 const CHAR_W: Record<string, number> = {
@@ -155,6 +156,11 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   const leakEl = useRef<HTMLDivElement>(null);
   const flashEl = useRef<HTMLDivElement>(null);
   const filterId = useMemo(() => "hb" + Math.random().toString(36).slice(2, 8), []);
+  // dragging text on the video: shown live from this offset, saved once when the mouse is released
+  type DragKind = "cap" | "hook" | "cta" | "title" | "beat";
+  const [dragOff, setDragOff] = useState<{ kind: DragKind; dx: number; dy: number } | null>(null);
+  const curPos = useRef<Record<string, [number, number]>>({});
+  useEffect(() => { setDragOff((d) => (d && (d.kind === "title" || d.kind === "beat") ? null : d)); }, [story]);
 
   const audioKey = p.withAudio ? JSON.stringify([clip.id, edits.trim, edits.cut, edits.fix, edits.hook, edits.audio, edits.style, edits.place, edits.zooms, edits.zoom_mult, edits.vibe]) : "";
   useEffect(() => {
@@ -394,6 +400,51 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   const k = W / 1080;
   const grade = GRADE_CSS[gradeKey] ?? "";
 
+  // ------------------------------------------------------------------ drag text on the video (editor only)
+  const dragProps = (kind: DragKind) => {
+    if (!p.onPlace) return {};
+    const SCALE: Record<DragKind, keyof Place | null> = { cap: "cap_scale", hook: "hook_scale", cta: null, title: "title_scale", beat: "beat_scale" };
+    return {
+      title: "Drag to move · mouse wheel to resize",
+      onClick: (e: React.MouseEvent) => e.stopPropagation(),
+      onWheel: (e: React.WheelEvent) => {
+        const key = SCALE[kind];
+        if (!key) return;
+        e.stopPropagation();
+        const cur = (place[key] as number | undefined) ?? 1;
+        const lim: [number, number] = kind === "title" || kind === "beat" ? [0.4, 2] : [0.5, 1.6];
+        p.onPlace!({ [key]: Math.round(Math.min(lim[1], Math.max(lim[0], cur + (e.deltaY < 0 ? 0.05 : -0.05))) * 100) / 100 });
+      },
+      onPointerDown: (e: React.PointerEvent) => {
+        if (e.button !== 0) return;
+        e.preventDefault(); e.stopPropagation();
+        const x0 = e.clientX, y0 = e.clientY;
+        const bw = box.current?.clientWidth || W, bh = (bw * 16) / 9;
+        let last = { dx: 0, dy: 0 };
+        const mv = (ev: PointerEvent) => {
+          last = { dx: (ev.clientX - x0) / bw, dy: (ev.clientY - y0) / bh };
+          setDragOff({ kind, ...last });
+        };
+        const up = () => {
+          window.removeEventListener("pointermove", mv);
+          window.removeEventListener("pointerup", up);
+          if (Math.abs(last.dx) + Math.abs(last.dy) < 0.004) { setDragOff(null); return; }
+          const r = (v: number) => Math.round(v * 1000) / 1000;
+          if (kind === "title" || kind === "beat") {
+            // the server lays these out again from the offset; keep showing the dragged spot until it answers
+            p.onPlace!({ [`${kind}_dx`]: r(((place as any)[`${kind}_dx`] ?? 0) + last.dx), [`${kind}_dy`]: r(((place as any)[`${kind}_dy`] ?? 0) + last.dy) });
+          } else {
+            const [bx, by] = curPos.current[kind] || [0.5, 0.5];
+            p.onPlace!({ [`${kind}_x`]: r(Math.min(0.93, Math.max(0.07, bx + last.dx))), [`${kind}_y`]: r(Math.min(0.93, Math.max(0.08, by + last.dy))) });
+            setDragOff(null);
+          }
+        };
+        window.addEventListener("pointermove", mv);
+        window.addEventListener("pointerup", up);
+      },
+    };
+  };
+
   // ------------------------------------------------------------------ captions
   const cap: CapStyle | undefined = catalog?.captions[style.caption_style];
   const chunks = useMemo(() => cap ? chunkWords(tlF.words, cap.chunk, cap.maxchars) : [], [tlF, cap]);
@@ -448,7 +499,12 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
       }
       const em = emOf(cap.font);
       const px = fs * k;                          // ASS size in preview pixels
-      const y = (place.cap_y != null ? Math.min(1790, Math.max(140, place.cap_y * 1920)) / 1920 : POS[style.position] ?? 0.7) * H;
+      const capYf = place.cap_y != null ? Math.min(1790, Math.max(140, place.cap_y * 1920)) / 1920 : POS[style.position] ?? 0.7;
+      const capXf = place.cap_x != null ? Math.min(1000, Math.max(80, place.cap_x * 1080)) / 1080 : 0.5;
+      curPos.current.cap = [capXf, capYf];
+      const dC = dragOff?.kind === "cap" ? dragOff : null;
+      const y = (capYf + (dC?.dy ?? 0)) * H;
+      const capLeft = (capXf + (dC?.dx ?? 0)) * W;
       const stroke = cap.bord * k * 2;
       const shadow = cap.shadow ? `${cap.shadow * k}px ${cap.shadow * k}px 0 rgba(0,0,0,.55)` : "none";
       const glow = cap.glow ? `, 0 0 ${14 * k}px ${cap.glow}, 0 0 ${28 * k}px ${cap.glow}` : "";
@@ -494,8 +550,8 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
       const shown = cap.mode === "oneword" ? [words[Math.max(0, activeIdx)]] : words;
       const tilt = cap.tilt ? (plan?.tilts?.[ci] ?? (ci % 2 ? 2 : -2)) : 0;
       capEl = (
-        <div className={`cap ${cap.box ? "cap-box" : ""} ${cap.slide ? "cap-slide" : ""} ${cap.fade ? "cap-fade" : ""}`} key={"c" + ci} style={{
-          top: y, fontFamily: `"${cap.font}", Impact, sans-serif`, fontSize: px * em, lineHeight: `${px}px`, whiteSpace: "nowrap", maxWidth: "none",
+        <div className={`cap ${cap.box ? "cap-box" : ""} ${cap.slide ? "cap-slide" : ""} ${cap.fade ? "cap-fade" : ""} ${p.onPlace ? "draggable" : ""}`} key={"c" + ci} {...dragProps("cap")} style={{
+          top: y, left: capLeft, fontFamily: `"${cap.font}", Impact, sans-serif`, fontSize: px * em, lineHeight: `${px}px`, whiteSpace: "nowrap", maxWidth: "none",
           WebkitTextStroke: cap.box || cap.mode === "hollow" ? undefined : `${stroke}px ${cap.outline}`,
           textShadow: cap.box ? "none" : shadow + glow,
           background: cap.box ? hexA(cap.outline, 1 - (cap.box_alpha ?? 0)) : undefined,
@@ -522,14 +578,18 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
       let lines = wrapMeasured(hook.font, txt, size, 3, 880);
       while (!lines && size > 40) { size = Math.floor(size * 0.9); lines = wrapMeasured(hook.font, txt, size, 3, 900); }
       if (!lines) lines = [txt];
-      const yy = place.hook_y != null ? Math.min(1790, Math.max(140, place.hook_y * 1920)) : hook.y - 10 + ((lines.length - 1) * size) / 2;
+      const yy0 = place.hook_y != null ? Math.min(1790, Math.max(140, place.hook_y * 1920)) : hook.y - 10 + ((lines.length - 1) * size) / 2;
+      const hookXf = place.hook_x != null ? Math.min(1000, Math.max(80, place.hook_x * 1080)) / 1080 : 0.5;
+      curPos.current.hook = [hookXf, yy0 / 1920];
+      const dH = dragOff?.kind === "hook" ? dragOff : null;
+      const yy = yy0 + (dH?.dy ?? 0) * 1920;
       const px = size * k;
       const em = emOf(hook.font);
       const outline = hook.outline ? `${(hook.bord || 6) * k * 2}px ${hook.outline}` : undefined;
       const boxBg = hook.box ? hexA(hook.box, 1 - (hook.box_alpha ?? 0)) : undefined;
       hookEl = (
-        <div className={`hook anim-${hook.anim}`} style={{
-          top: (yy / 1920) * H, fontFamily: `"${hook.font}", Impact, sans-serif`, fontSize: px * em, lineHeight: `${px}px`, color: hook.color,
+        <div className={`hook anim-${hook.anim} ${p.onPlace ? "draggable" : ""}`} {...dragProps("hook")} style={{
+          top: (yy / 1920) * H, left: (hookXf + (dH?.dx ?? 0)) * W, fontFamily: `"${hook.font}", Impact, sans-serif`, fontSize: px * em, lineHeight: `${px}px`, color: hook.color,
           WebkitTextStroke: hook.box ? undefined : outline, whiteSpace: "nowrap",
           textShadow: hook.glow ? `0 0 ${16 * k}px ${hook.glow}, 0 0 ${30 * k}px ${hook.glow}` : hook.box ? "none" : `${4 * k}px ${4 * k}px 0 rgba(0,0,0,.55)`,
           transform: `translate(-50%, -50%) translateY(${dyOf(hook.font) * px}px) rotate(${-(hook.tilt || 0)}deg)`,
@@ -542,9 +602,13 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   }
   const cta: CtaStyle | undefined = style.cta_style ? catalog?.ctas[style.cta_style] : undefined;
   const ctaText = settings.cta_text || "";
+  const ctaYf = place.cta_y != null ? Math.min(1790, Math.max(140, place.cta_y * 1920)) / 1920 : 0.42;
+  const ctaXf = place.cta_x != null ? Math.min(1000, Math.max(80, place.cta_x * 1080)) / 1080 : 0.5;
+  curPos.current.cta = [ctaXf, ctaYf];
+  const dT = dragOff?.kind === "cta" ? dragOff : null;
   const ctaEl = cta && ctaText.trim() && D >= 8 && T >= D - 2.6 ? (
-    <div className={`cta anim-${cta.anim}`} style={{
-      top: (place.cta_y != null ? Math.min(1790, Math.max(140, place.cta_y * 1920)) / 1920 : 0.42) * H,
+    <div className={`cta anim-${cta.anim} ${p.onPlace ? "draggable" : ""}`} {...dragProps("cta")} style={{
+      top: (ctaYf + (dT?.dy ?? 0)) * H, left: (ctaXf + (dT?.dx ?? 0)) * W,
       fontFamily: `"${cta.font}", sans-serif`, fontSize: cta.size * k * emOf(cta.font), lineHeight: `${cta.size * k}px`, color: cta.color,
       background: cta.box, boxShadow: cta.box ? `0 0 0 ${18 * k}px ${cta.box}` : undefined,
       WebkitTextStroke: cta.outline ? `${(cta.bord || 5) * k * 2}px ${cta.outline}` : undefined,
@@ -557,7 +621,10 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
   const wmPos = place.wm_pos || "top";
 
   // ------------------------------------------------------------------ Story FX titles + beat text
+  const titleSet = new Set(story?.title?.els || []);
   const storyEl = storyEls.filter((e) => T >= e.t0 && T < e.t1).map((e, i) => {
+    const grp: DragKind = titleSet.has(e) ? "title" : "beat";
+    const dS = dragOff?.kind === grp ? dragOff : null;
     const fam = e.font === "Lato" && e.bold ? "Lato Bold" : e.font;
     const px = e.size * k;
     const [ax, ay] = AN[e.an] || AN[5];
@@ -573,8 +640,8 @@ export const ClipPlayer = forwardRef<PlayerHandle, Props>(function ClipPlayer(p,
     const shadow = e.shadow ? `${3 * k}px ${5 * k}px ${Math.max(3, e.size / 28) * k * 2}px rgba(0,0,0,.45)` : "";
     const glow = e.glow ? `0 0 ${(e.size / 9) * k}px rgba(255,255,255,.6), 0 0 ${(e.size / 4) * k}px rgba(255,255,255,.25)` : "";
     return (
-      <div key={`${e.t0}:${e.text}:${i}`} className="story-el" style={{
-        left: e.x * k, top: e.y * k, transform: `translate(${ax}, ${ay}) translateY(${dyOf(fam) * px}px)`,
+      <div key={`${e.t0}:${e.text}:${i}`} className={`story-el ${p.onPlace ? "draggable" : ""}`} {...dragProps(grp)} style={{
+        left: e.x * k + (dS?.dx ?? 0) * W, top: e.y * k + (dS?.dy ?? 0) * H, transform: `translate(${ax}, ${ay}) translateY(${dyOf(fam) * px}px)`,
         opacity: out ? 0 : 1, transition: out ? "opacity 260ms linear" : undefined,
       }}>
         <span style={{

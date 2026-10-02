@@ -555,7 +555,10 @@ def _make_handler(app: App):
         st = Settings.load()
         key = hashlib.md5(json.dumps([p["id"], a["clip"], edits, st.sfx_level, st.add_music, st.music_mode,
                                       st.music_selected, st.cta_text, st.sfx_pack, st.music_match, st.zoom_strength,
-                                      st.motion, st.intro, st.color_grade, 6, _music_sig(st)],
+                                      st.motion, st.intro, st.color_grade, 8, _music_sig(st),
+                                      st.story_fx, st.story_pauses, st.story_titles, st.story_transitions,
+                                      st.story_textures, st.story_behind, st.watermark, st.remove_pauses,
+                                      len((projects.clip(p, str(a["clip"])) or {}).get("camera") or [])],
                                      sort_keys=True, default=str).encode()).hexdigest()[:14]
         out = FRAMES / f"aud_{key}.ogg"
         side = FRAMES / f"aud_{key}.json"
@@ -739,6 +742,77 @@ def _make_handler(app: App):
         pf.write_text(json.dumps(d2, ensure_ascii=False, indent=1), encoding="utf-8")
         E.bus.emit("library", {})
         return {"cover": res["path"], "provider": res["provider"], "cover_info": d2["cover_info"]}
+
+    def _thumb_frame(d: dict, aspect: str, pos: float, tag: str) -> str:
+        """Clean frame of the Short (no captions) for the thumbnail tools."""
+        from . import thumbnail
+        from .renderer import RenderJob, _camera_at, source_time
+        out = Path(d["output"])
+        work = data_dir() / "work" / "thumbs"
+        work.mkdir(parents=True, exist_ok=True)
+        prep = d.get("prep") or {}
+        fpath = str(work / f"{abs(hash(str(out))) % 10**10}_{tag}_{aspect.replace(':', 'x')}_{int(pos * 1000)}.jpg")
+        src, info = d.get("src_file") or "", d.get("info") or {}
+        if src and Path(src).exists():
+            cl = d["clip"]
+            job = RenderJob(src=src, start=cl["start"], end=cl["end"], out_path="", src_w=info.get("width", 0),
+                            src_h=info.get("height", 0), ass_file="", parts=prep.get("pieces") or [])
+            tp = pos * job.cut_duration
+            cam = prep.get("camera") or []
+            cx = _camera_at([tuple(c) for c in cam], tp) if cam and prep.get("layout") == "smart_crop" else None
+            return thumbnail.clean_frame(src, source_time(job, tp) - float(d.get("src_offset") or 0.0), fpath, aspect,
+                                         cx, (info.get("width", 0), info.get("height", 0)))
+        return thumbnail.clean_frame(str(out), pos * float(prep.get("D") or 10), fpath, aspect)
+
+    def thumb_assets(a):
+        """Designer: a clean frame + the speaker cut out of it (transparent PNG)."""
+        from . import thumbnail
+        pf, d = _thumb_plan(a)
+        aspect = str(a.get("aspect") or "9:16")
+        if aspect not in thumbnail.SIZES:
+            aspect = "9:16"
+        pos = min(max(0.0, float(a.get("at") if a.get("at") is not None else 0.3)), 0.98)
+        try:
+            frame = _thumb_frame(d, aspect, pos, "d")
+        except Exception as e:
+            raise ApiError(f"Couldn't grab a frame from the video: {str(e).splitlines()[0][:160]}")
+        cut = frame[:-4] + "_cut.png"
+        try:
+            box = thumbnail.cutout_png(frame, cut)
+        except Exception:
+            box = None
+        w, h = thumbnail.SIZES[aspect]
+        return {"frame": frame, "cutout": cut if box else "", "box": box, "w": w, "h": h,
+                "design": (d.get("cover_info") or {}).get("design"), "title": d.get("hook_text") or (d.get("meta") or {}).get("title", "")}
+
+    def thumb_analyze(a):
+        from . import thumbnail
+        ref = str(a.get("ref") or "")
+        if not ref or not (_is_allowed(Path(ref)) and Path(ref).is_file()):
+            raise ApiError("Add a reference image first.")
+        try:
+            return thumbnail.analyze_reference(ref)
+        except thumbnail.ThumbError as e:
+            raise ApiError(str(e))
+
+    def thumb_save(a):
+        from . import thumbnail
+        pf, d = _thumb_plan(a)
+        aspect = str(a.get("aspect") or "9:16")
+        if aspect not in thumbnail.SIZES:
+            aspect = "9:16"
+        dst = str(Path(d["output"]).with_suffix(".cover.jpg"))
+        try:
+            thumbnail.save_design(str(a.get("image") or ""), aspect, dst)
+        except thumbnail.ThumbError as e:
+            raise ApiError(str(e))
+        d2 = json.loads(pf.read_text(encoding="utf-8"))
+        d2["cover"] = dst
+        d2["cover_info"] = {"mode": "design", "aspect": aspect, "provider": "designer", "design": a.get("design"),
+                            "ref": str(a.get("ref") or ""), "time": time.time()}
+        pf.write_text(json.dumps(d2, ensure_ascii=False, indent=1), encoding="utf-8")
+        E.bus.emit("library", {})
+        return {"cover": dst, "cover_info": d2["cover_info"]}
 
     def thumb_remove(a):
         pf, d = _thumb_plan(a)
@@ -1170,6 +1244,9 @@ def _make_handler(app: App):
         ("POST", "/api/thumb/ref"): thumb_ref,
         ("POST", "/api/thumb/make"): thumb_make,
         ("POST", "/api/thumb/remove"): thumb_remove,
+        ("POST", "/api/thumb/assets"): thumb_assets,
+        ("POST", "/api/thumb/analyze"): thumb_analyze,
+        ("POST", "/api/thumb/save"): thumb_save,
         ("POST", "/api/open"): open_any,
         ("GET", "/api/accounts"): accounts,
         ("POST", "/api/signin/start"): signin_start,

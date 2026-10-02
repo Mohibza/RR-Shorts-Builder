@@ -353,6 +353,15 @@ def _py(place: dict, key: str, default: int, lo: int = 140, hi: int = 1790) -> i
         return default
 
 
+def _px(place: dict, key: str) -> int:
+    """Horizontal centre in px from a 0..1 fraction (text dragged in the editor); the middle by default."""
+    v = (place or {}).get(key)
+    try:
+        return 540 if v is None else int(min(1000, max(80, float(v) * 1080)))
+    except (TypeError, ValueError):
+        return 540
+
+
 def _pscale(place: dict, key: str) -> float:
     try:
         return min(1.6, max(0.5, float((place or {}).get(key, 1.0))))
@@ -457,6 +466,7 @@ def build_captions(ab: AssBuilder, words: list[dict], clip_dur: float, plan: Tex
     size = st["size"] if not rtl else int(st["size"] * 0.85)
     size = int(size * _pscale(plan.place, "cap_scale"))
     y = _py(plan.place, "cap_y", int(H * POSITIONS.get(plan.position, 0.70)))
+    cx = _px(plan.place, "cap_x")
     mode = st["mode"]
 
     if st.get("box"):
@@ -508,11 +518,11 @@ def build_captions(ab: AssBuilder, words: list[dict], clip_dur: float, plan: Tex
 
         fs_tag = f"\\fs{fs}" if fs != size else ""
         tilt = f"\\frz{rnd.uniform(-4, 4):.1f}" if st.get("tilt") else ""
-        base_pos = f"\\an5\\pos(540,{y})\\blur0.6"  # soft anti-aliased edges look far more premium
+        base_pos = f"\\an5\\pos({cx},{y})\\blur0.6"  # soft anti-aliased edges look far more premium
 
         def entrance() -> str:
             if st.get("slide"):
-                return f"\\an5\\move(540,{y + 70},540,{y},0,140)\\blur0.6\\alpha&HFF&\\t(0,120,\\alpha&H00&)"
+                return f"\\an5\\move({cx},{y + 70},{cx},{y},0,140)\\blur0.6\\alpha&HFF&\\t(0,120,\\alpha&H00&)"
             if st.get("bounce"):
                 return f"{base_pos}\\fscx72\\fscy72\\t(0,110,\\fscx106\\fscy106)\\t(110,190,\\fscx100\\fscy100)"
             if st.get("fade"):
@@ -622,6 +632,7 @@ def build_hook(ab: AssBuilder, text: str, clip_dur: float, style_key: str, seed:
         dur = min(clip_dur, max(1.0, float(place["hook_dur"])))
     y = st["y"] - 10 + (len(lines) - 1) * size // 2  # grow downward, clear of the part label
     y = _py(place, "hook_y", y)
+    cx = _px(place, "hook_x")
     tilt = f"\\frz{st['tilt']}" if st.get("tilt") else ""
     if st.get("box"):
         ab.add_style("Hook", fam, size, st["color"], outline=st["box"], back=st["box"], bord=20, shadow=0,
@@ -630,14 +641,14 @@ def build_hook(ab: AssBuilder, text: str, clip_dur: float, style_key: str, seed:
         ab.add_style("Hook", fam, size, st["color"], outline=st.get("outline", "#000000"),
                      bord=st.get("bord", 6), shadow=4)
     anim = st.get("anim")
-    pos = f"\\an5\\pos(540,{y})"
+    pos = f"\\an5\\pos({cx},{y})"
     out_fade = "\\fad(0,200)" if st.get("dur") else ""
     if anim == "pop":
         a = f"{pos}\\fscx40\\fscy40\\t(0,140,\\fscx112\\fscy112)\\t(140,240,\\fscx100\\fscy100){out_fade}"
     elif anim == "drop":
-        a = f"\\an5\\move(540,{y - 140},540,{y},0,220)\\fad(120,200)"
+        a = f"\\an5\\move({cx},{y - 140},{cx},{y},0,220)\\fad(120,200)"
     elif anim == "slide":
-        a = f"\\an5\\move(-400,{y},540,{y},0,260){out_fade}"
+        a = f"\\an5\\move(-400,{y},{cx},{y},0,260){out_fade}"
     elif anim == "flicker":
         a = (f"{pos}\\alpha&HFF&\\t(0,60,\\alpha&H00&)\\t(60,120,\\alpha&HC0&)\\t(120,180,\\alpha&H00&)"
              f"\\t(260,300,\\alpha&H90&)\\t(300,340,\\alpha&H00&){out_fade}")
@@ -652,11 +663,11 @@ def build_hook(ab: AssBuilder, text: str, clip_dur: float, style_key: str, seed:
     if anim == "glitch":
         # chromatic split that settles, plus a few shake frames
         for dx, c in ((-10, "#00FFFF"), (10, "#FF00FF")):
-            ab.ev(0, dur, "Hook", "{" + f"\\an5\\move({540 + dx * 2},{y},{540 + dx // 3},{y},0,400)"
+            ab.ev(0, dur, "Hook", "{" + f"\\an5\\move({cx + dx * 2},{y},{cx + dx // 3},{y},0,400)"
                   + f"\\c{col(c)}\\3a&HFF&\\4a&HFF&\\alpha&H40&\\fad(80,200)" + "}" + body, layer=5)
         for i, (dx, dy) in enumerate(((14, -6), (-12, 5), (8, 7), (-6, -4))):
             t0 = 0.05 + i * 0.07
-            ab.ev(t0, t0 + 0.06, "Hook", "{" + f"\\an5\\pos({540 + dx},{y + dy})" + "}" + body, layer=7)
+            ab.ev(t0, t0 + 0.06, "Hook", "{" + f"\\an5\\pos({cx + dx},{y + dy})" + "}" + body, layer=7)
         ab.ev(0.33, dur, "Hook", "{" + a + tilt + "}" + body, layer=6)
         return
     ab.ev(0, dur, "Hook", "{" + a + tilt + "}" + body, layer=6)
@@ -675,16 +686,17 @@ def build_cta(ab: AssBuilder, text: str, clip_dur: float, style_key: str, place:
         ab.add_style("Cta", fam, st["size"], st["color"], outline=st.get("outline", "#000000"),
                      bord=st.get("bord", 5), shadow=3)
     y = _py(place, "cta_y", int(H * 0.42))
+    cx = _px(place, "cta_x")
     s = max(0.0, clip_dur - 2.6)
     anim = st["anim"]
     if anim == "slide":
-        a = f"\\an5\\move(540,{y + 200},540,{y},0,260)\\fad(150,0)"
+        a = f"\\an5\\move({cx},{y + 200},{cx},{y},0,260)\\fad(150,0)"
     elif anim == "pulse":
-        a = (f"\\an5\\pos(540,{y})\\fad(150,0)\\t(0,300,\\fscx112\\fscy112)\\t(300,600,\\fscx100\\fscy100)"
+        a = (f"\\an5\\pos({cx},{y})\\fad(150,0)\\t(0,300,\\fscx112\\fscy112)\\t(300,600,\\fscx100\\fscy100)"
              f"\\t(600,900,\\fscx112\\fscy112)\\t(900,1200,\\fscx100\\fscy100)\\t(1200,1500,\\fscx112\\fscy112)"
              f"\\t(1500,1800,\\fscx100\\fscy100)")
     else:
-        a = f"\\an5\\pos(540,{y})\\fad(300,0)"
+        a = f"\\an5\\pos({cx},{y})\\fad(300,0)"
     ab.ev(s, clip_dur, "Cta", "{" + a + "}" + txt, layer=8)
 
 

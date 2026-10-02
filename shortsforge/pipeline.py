@@ -665,7 +665,8 @@ class Pipeline:
             sp = story_fx.plan(words, D, pieces, vibe, seed, title, clip.keywords, lang, prep["layout"], opts,
                                bool((clip.reasons or {}).get("cold_open")), getattr(s, "watermark", ""),
                                cap.get("active") or cap.get("primary") or "#FFE400", _seams(pieces), fps,
-                               *face_top(tracks, pieces, prep["layout"], media, src_offset, prep.get("camera"), src_wh))
+                               *face_top(tracks, pieces, prep["layout"], media, src_offset, prep.get("camera"), src_wh),
+                               place=dict(choice.place or {}))
         except Exception as e:      # Story FX is a bonus: never fail a Short over it
             self.log(f"  (story effects skipped: {e})")
             sp = story_fx.plan([], 0, [], "story", 0, "", [], lang, "blur_fit", {"level": "off"}, False)
@@ -791,6 +792,12 @@ class Pipeline:
             (choice.layout if choice.layout != "auto" else "blur_fit")
         if not (project["info"]["width"] > project["info"]["height"] * 0.8):
             prep["layout"] = "fit"
+        # use the same face-follow window the export will use, so the title sits at the same height in both
+        cam0 = c.get("camera") or []
+        if cam0 and prep["layout"] in ("smart_crop", "zoom45") and parts:
+            cwp = int(project["info"]["height"] * 9 / 16)
+            first = next((x for t, x in cam0 if t >= parts[0][0] - 0.01), cam0[0][1])
+            prep["camera"] = [[0.0, first * max(1, project["info"]["width"] - cwp)]]
         fprep, sp = self._story(s, cin, prep, cl, int(c["index"]), project.get("language", "en"), choice,
                                 hook or None, fps, c.get("tracks"), c["media"]["file"], off,
                                 (project["info"]["width"], project["info"]["height"]))
@@ -1153,7 +1160,8 @@ class Pipeline:
         Path(plan_file).write_text(json.dumps({
             "version": 1, "source": item.source, "source_title": item.title, "vid": item.vid,
             "src_file": src, "src_offset": off, "info": info, "clip": clip.to_dict(), "index": index,
-            "style": asdict(choice), "resolved_layout": layout, "hook_text": plan.hook_text,
+            "style": asdict(choice), "resolved_layout": layout,
+            "hook_text": plan.hook_text or (((extra.get("hook_text") or clip.title) or "") if sp.get("title") else ""),
             "language": lang, "words_abs": words_abs, "meta": meta, "output": str(out_path), "thumb": thumb,
             "created": time.time(), "prep": prep, "music": music, "music_offset": music_offset,
             "project_ref": extra.get("project_ref"), "creative": cr.to_json(), "story": sp, **keep_cover,

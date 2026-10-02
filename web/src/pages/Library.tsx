@@ -5,6 +5,7 @@ import type { LibItem } from "../lib/types";
 import { Icon } from "../components/Icon";
 import { Btn, Empty, Field, IconBtn, Modal, Select, Tags, Text, Toggle, timeAgo } from "../components/ui";
 import { fmt } from "../lib/timeline";
+import { ThumbDesigner } from "../components/ThumbDesigner";
 
 export const PLAT_ICON: Record<string, string> = { youtube: "youtube", tiktok: "tiktok", facebook: "facebook", instagram: "instagram" };
 
@@ -132,6 +133,7 @@ function ThumbMaker({ it, title, onChanged }: { it: LibItem; title: string; onCh
   const [useFrame, setUseFrame] = useState(ci.use_frame !== false);
   const [busy, setBusy] = useState<"" | "ai" | "frame">("");
   const [provs, setProvs] = useState<string[] | null>(null);
+  const [design, setDesign] = useState(false);
   useEffect(() => { if (open && provs === null) get<{ providers: string[] }>("/api/thumb/info").then((r) => setProvs(r.providers)).catch(() => setProvs([])); }, [open]);
   const make = async (mode: "ai" | "frame") => {
     setBusy(mode);
@@ -179,13 +181,16 @@ function ThumbMaker({ it, title, onChanged }: { it: LibItem; title: string; onCh
           </div>
         </div>
       </div>
-      {noKey && <p className="muted small">AI thumbnails need a Gemini or OpenAI key (Settings → AI). Without a key, “From video frame” still works.</p>}
+      {noKey && <p className="muted small">The designer is free and needs no key. “Generate with AI” needs a Gemini or OpenAI key (Settings → AI).</p>}
       <div className="row gap wrap">
-        <Btn kind="primary" icon="spark" busy={busy === "ai"} disabled={!!busy || noKey || (!prompt.trim() && !ref)} onClick={() => make("ai")}>{cover ? "Generate again" : "Generate with AI"}</Btn>
-        <Btn icon="frame" busy={busy === "frame"} disabled={!!busy} onClick={() => make("frame")}>From video frame</Btn>
+        <Btn kind="primary" icon="wand" disabled={!!busy} onClick={() => setDesign(true)}>{ci.mode === "design" && cover ? "Edit in designer" : "Open designer (free)"}</Btn>
+        <Btn icon="spark" busy={busy === "ai"} disabled={!!busy || noKey || (!prompt.trim() && !ref)} onClick={() => make("ai")}>Generate with AI</Btn>
+        <Btn icon="frame" busy={busy === "frame"} disabled={!!busy} onClick={() => make("frame")}>Quick: frame + title</Btn>
         {cover && <Btn kind="ghost" icon="folder" onClick={() => api("/api/open", { path: cover, select: true })}>Show file</Btn>}
         {cover && <Btn kind="ghost" icon="trash" disabled={!!busy} onClick={remove}>Remove</Btn>}
       </div>
+      {design && <ThumbDesigner planFile={it.plan_file} initialAspect={aspect} initialRef={ref} onClose={() => setDesign(false)}
+        onSaved={(c, t) => { setCover(c); setVer(t); onChanged(); }} />}
     </div>
   );
 }

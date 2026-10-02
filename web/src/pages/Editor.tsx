@@ -124,7 +124,8 @@ function EditorInner({ p, c }: { p: Project; c: Clip }) {
           <div className="ed-player">
             <ClipPlayer ref={player} clip={c} pid={p.id} edits={edits} style={style} catalog={cat} settings={settings} controls
               camera={c.camera} framing={c.framing} srcWH={[p.info.width, p.info.height]} hookText={hookText}
-              onPlan={setPlan} fill withAudio />
+              onPlan={setPlan} fill withAudio
+              onPlace={(patch) => change((e) => ({ ...e, place: { ...(e.place ?? style.place ?? {}), ...patch } }))} />
             {frame && <div className="exact" onClick={() => setFrame("")}><img src={frame} alt="Exact frame" /><span className="chip dark"><Icon name="frame" size={13} /> Exact frame · click to go back to live</span></div>}
           </div>
           <TrimBar c={c} edits={edits} tl={tl} plan={plan} onTrim={(tr) => change((e) => ({ ...e, trim: tr }))} onSeek={seekPre} fr={fr} />
@@ -589,6 +590,9 @@ function LayoutTab({ style, change, landscape }: { style: Style; change: (f: (e:
         <Field label="Move left / right"><Slider value={pl.frame_x ?? 0} min={-1} max={1} step={0.05} fmt={(v) => (v ? (v > 0 ? "→" : "←") + Math.round(Math.abs(v) * 100) : "0")} onChange={(v) => setPl({ frame_x: v })} /></Field>
         <Field label="Move up / down"><Slider value={pl.frame_y ?? 0} min={-1} max={1} step={0.05} fmt={(v) => (v ? (v > 0 ? "↓" : "↑") + Math.round(Math.abs(v) * 100) : "0")} onChange={(v) => setPl({ frame_y: v })} /></Field>
       </div>
+      <div className="drag-hint"><Icon name="edit" size={14} /> <span>Drag any text on the video to move it (captions, hook, title, end card). Mouse wheel over it resizes.</span>
+        {["cap_x", "cap_y", "hook_x", "hook_y", "cta_x", "cta_y", "title_dx", "title_dy", "title_scale", "beat_dx", "beat_dy", "beat_scale", "cap_scale", "hook_scale"].some((k) => (pl as any)[k] != null) &&
+          <button className="linkbtn small" onClick={() => change((e) => { const n: any = { ...(e.place ?? style.place ?? {}) }; ["cap_x", "cap_y", "hook_x", "hook_y", "cta_x", "cta_y", "title_dx", "title_dy", "title_scale", "beat_dx", "beat_dy", "beat_scale", "cap_scale", "hook_scale"].forEach((k) => delete n[k]); return { ...e, place: n }; })}>Reset text positions</button>}</div>
       <div className="sec-head"><h3>Captions</h3></div>
       <div className="two">
         <Field label="Height on screen"><Slider value={capY} min={0.15} max={0.9} step={0.01} fmt={(v) => `${Math.round(v * 100)}%`} onChange={(v) => setPl({ cap_y: v })} /></Field>
