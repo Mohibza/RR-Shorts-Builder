@@ -176,6 +176,14 @@ def _run_webview(webview, app, url: str) -> int:
             pass
     server.FOCUS = focus
 
+    def quit_app():
+        try:
+            win.events.closing -= on_closing      # no "quit anyway?" question: the recorder asked for this
+        except Exception:
+            pass
+        win.destroy()
+    server.QUIT = quit_app
+
     def on_closing():
         if app.engine.busy():
             return win.create_confirmation_dialog(
@@ -260,12 +268,20 @@ def _run_app_window(app, url: str) -> int:
                              "--no-first-run", "--no-default-browser-check", "--autoplay-policy=no-user-gesture-required"])
     from shortsforge import server
     server.FOCUS = lambda: None
+    server.QUIT = proc.terminate
     proc.wait()
     return 0
 
 
 def main():
     _bundle_paths()
+    if "--record" in sys.argv:
+        # the screen recorder: a tiny process of its own (the big app has closed), see shortsforge/recorder.py
+        if str(HERE) not in sys.path:
+            sys.path.insert(0, str(HERE))
+        _fix_std_streams()
+        from shortsforge.recorder import run as record
+        sys.exit(record(sys.argv[sys.argv.index("--record") + 1]))
     if "--selftest" in sys.argv:
         _fix_std_streams()
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

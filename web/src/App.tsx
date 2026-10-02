@@ -11,9 +11,12 @@ import { LibraryPage } from "./pages/Library";
 import { PublishPage } from "./pages/Publish";
 import { MusicPage } from "./pages/Music";
 import { SettingsPage } from "./pages/Settings";
+import { StudioPage } from "./pages/Studio";
+import { get } from "./lib/api";
 
 const NAV: [string, string, string][] = [
   ["create", "Create", "spark"],
+  ["studio", "Studio", "record"],
   ["projects", "Clips", "grid"],
   ["library", "Library", "film"],
   ["publish", "Publish", "rocket"],
@@ -84,6 +87,9 @@ export default function App() {
   useEffect(() => {
     if (!TOKEN) { setState({ error: "Open the app from its desktop shortcut (this page needs the app's launch key)." }); return; }
     refreshAll().catch((e) => setState({ error: String(e.message || e) }));
+    // back from a screen recording: open Studio on the new recording
+    get<{ sessions: { seen: boolean; state: string }[]; active: unknown }>("/api/record/sessions")
+      .then((r) => { if (r.active || r.sessions.some((x) => !x.seen)) go("studio", { editing: null }); }).catch(() => {});
     return startEvents();
   }, []);
 
@@ -112,6 +118,7 @@ export default function App() {
       <main className="main">
         {editing ? <Editor key={editing.project + editing.clip} pid={editing.project} cid={editing.clip} /> :
           page === "create" ? <CreatePage /> :
+          page === "studio" ? <StudioPage /> :
           page === "projects" ? <ProjectsPage /> :
           page === "library" ? <LibraryPage /> :
           page === "publish" ? <PublishPage /> :

@@ -225,6 +225,19 @@ class Settings:
     cookies_browser: str = ""        # e.g. chrome, edge, firefox (for yt-dlp)
 
     extra: dict = field(default_factory=dict)
+    # Screen recorder (recorder.py): the app closes while recording; these keys control it
+    rec_source: dict = field(default_factory=lambda: {"kind": "screen", "monitor": 0})
+    rec_fps: int = 30
+    rec_quality: str = "high"        # high | medium | small
+    rec_mic: str = "default"         # "default" = first microphone, "" = none, or a device name
+    rec_system_audio: bool = True
+    rec_webcam: str = ""
+    rec_cursor: bool = True
+    rec_track_input: bool = True     # log clicks / cursor / typing moments (never which keys) for auto zooms
+    rec_countdown: int = 3
+    rec_method: str = "auto"         # auto | compatible
+    rec_hotkeys: dict = field(default_factory=lambda: {"stop": "ctrl+s", "pause": "ctrl+p", "resume": "ctrl+r",
+                                                       "marker": "ctrl+m", "cancel": "ctrl+shift+alt+x"})
     # Story FX (story.py): dramatic beats, editorial titles, streak transitions, film texture
     story_fx: str = "auto"           # off | auto | strong
     story_pauses: bool = True        # freeze-frame beats before the payoff (+ "rewind" after a cold open)

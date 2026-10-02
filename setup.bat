@@ -38,10 +38,11 @@ if not exist ".venv\Scripts\python.exe" (
 )
 echo [2/5] Installing Python packages (first time takes a few minutes)...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip >nul
-findstr /v /i "pywebview" requirements.txt > "%TEMP%\rr_req.txt"
+findstr /v /i "pywebview soundcard" requirements.txt > "%TEMP%\rr_req.txt"
 ".venv\Scripts\python.exe" -m pip install -r "%TEMP%\rr_req.txt" || (echo Package install failed & pause & exit /b 1)
 REM the app window (Microsoft Edge WebView2); optional - without it the app opens in an Edge app window
 ".venv\Scripts\python.exe" -m pip install "pywebview>=5.3" || echo      (app window package skipped - the app will use an Edge window instead)
+".venv\Scripts\python.exe" -m pip install "soundcard>=0.4.3" || echo      (PC sound capture skipped - the screen recorder still records the screen and microphone)
 
 REM ---------- 3. FFmpeg ----------
 where ffmpeg >nul 2>&1

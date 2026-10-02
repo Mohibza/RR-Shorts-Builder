@@ -41,6 +41,7 @@ const P: Record<string, string> = {
   calendar: "M3 5h18v16H3z M3 10h18 M8 3v4 M16 3v4",
   log: "M4 6h16 M4 12h16 M4 18h10",
   undo: "M9 14L4 9l5-5 M4 9h11a5 5 0 0 1 0 10h-3",
+  record: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z",
   frame: "M4 8V4h4 M16 4h4v4 M20 16v4h-4 M8 20H4v-4",
   send: "M22 2L11 13 M22 2l-7 20-4-9-9-4z",
   key: "M15 7a4 4 0 1 1-3.9 5H3v4h3v-2h2v2h3.1A4 4 0 0 1 15 7z",

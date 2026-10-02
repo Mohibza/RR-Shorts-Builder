@@ -55,6 +55,7 @@ mimetypes.add_type("video/mp4", ".mp4")
 # optional native file dialog provided by the desktop window (pywebview); see app.py
 FILE_DIALOG: Optional[Callable[[str, bool], list]] = None
 FOCUS: Optional[Callable[[], None]] = None     # brings the app window to the front (second start)
+QUIT: Optional[Callable[[], None]] = None      # closes the app window (the screen recorder takes over)
 SECRET_KEYS = set()          # settings are local to this PC; nothing is hidden from the owner's own UI
 
 
@@ -658,6 +659,89 @@ def _make_handler(app: App):
         E.bus.emit("queue", {})
         return {"deleted": done, "posting": busy, "failed": failed}
 
+    # ---- screen recorder: the app closes, a tiny recorder process runs, then the app comes back
+    def rec_devices(_a):
+        from . import recsetup
+        d = recsetup.devices()
+        d["active"] = recsetup.active_session()
+        return d
+
+    def rec_region(_a):
+        from . import recsetup
+        r = recsetup.pick_region()
+        if FOCUS:
+            FOCUS()
+        return {"region": r}
+
+    def rec_check_keys(a):
+        from . import recorder
+        return recorder.hotkey_problems({**recorder.DEFAULT_HOTKEYS, **(a.get("hotkeys") or {})})
+
+    def rec_start(a):
+        from . import recsetup
+        if E.busy():
+            raise ApiError("Clips are still being made. Wait for them to finish (or cancel them), then record.")
+        s = Settings.load()
+        mons = recsetup.monitors()
+        src = dict(s.rec_source or {})
+        mon = mons[min(len(mons) - 1, max(0, int(src.get("monitor") or 0)))]
+        source = {"kind": src.get("kind") or "screen", "monitor": mon}
+        if source["kind"] == "region":
+            if not src.get("region"):
+                raise ApiError("Pick the region to record first.")
+            source["region"] = src["region"]
+        elif source["kind"] == "window":
+            if not src.get("title"):
+                raise ApiError("Pick the window to record first.")
+            source["title"] = src["title"]
+        mic = s.rec_mic
+        if mic == "default":
+            mics = recsetup.dshow_devices()["mics"]
+            mic = mics[0] if mics else ""
+        cfg = {"monitors": len(mons), "source": source, "fps": int(s.rec_fps or 30), "quality": s.rec_quality, "mic": mic,
+               "system_audio": bool(s.rec_system_audio) and recsetup.recorder.system_audio_available(),
+               "webcam": s.rec_webcam or "", "cursor": bool(s.rec_cursor), "track_input": bool(s.rec_track_input),
+               "method": s.rec_method, "hotkeys": dict(s.rec_hotkeys or {}), "name": str(a.get("name") or "")[:80]}
+        try:
+            res = recsetup.start(cfg)
+        except ValueError as e:
+            raise ApiError(str(e))
+        E.bus.log("Screen recording started. The app closes now and comes back when you stop.")
+        if QUIT and not a.get("keep_open"):
+            threading.Timer(0.5, QUIT).start()        # answer the page first, then close the window
+        return res
+
+    def rec_control(a):
+        from . import recsetup
+        if not recsetup.control(str(a["id"]), str(a["cmd"])):
+            raise ApiError("That recording isn't running.")
+        return True
+
+    def rec_sessions(_a):
+        from . import recsetup
+        return {"sessions": recsetup.sessions(), "active": recsetup.active_session()}
+
+    def rec_update(a):
+        from . import recsetup
+        patch = {k: a[k] for k in ("name", "seen") if k in a}
+        m = recsetup.update(str(a["id"]), **patch)
+        if m is None:
+            raise ApiError("Recording not found.", 404)
+        return m
+
+    def rec_delete(a):
+        from . import recsetup
+        recsetup.delete(str(a["id"]))
+        return True
+
+    def rec_to_shorts(a):
+        """Send a recording into the Shorts pipeline (find the best moments, like any other video)."""
+        from . import recsetup
+        m = next((x for x in recsetup.sessions(False) if x["id"] == str(a["id"])), None)
+        if not m or not m.get("video"):
+            raise ApiError("Recording not found.", 404)
+        return E.add_sources(m["video"])
+
     # ---- thumbnails (optional): prompt + reference -> AI image, or a clean frame + title
     def _thumb_plan(a):
         pf = Path(str(a["plan_file"]))
@@ -1240,6 +1324,15 @@ def _make_handler(app: App):
         ("POST", "/api/library/delete"): library_delete,
         ("POST", "/api/library/delete_many"): library_delete_many,
         ("POST", "/api/library/upload"): library_upload,
+        ("GET", "/api/record/devices"): rec_devices,
+        ("POST", "/api/record/region"): rec_region,
+        ("POST", "/api/record/keys"): rec_check_keys,
+        ("POST", "/api/record/start"): rec_start,
+        ("POST", "/api/record/control"): rec_control,
+        ("GET", "/api/record/sessions"): rec_sessions,
+        ("POST", "/api/record/update"): rec_update,
+        ("POST", "/api/record/delete"): rec_delete,
+        ("POST", "/api/record/to_shorts"): rec_to_shorts,
         ("GET", "/api/thumb/info"): thumb_info,
         ("POST", "/api/thumb/ref"): thumb_ref,
         ("POST", "/api/thumb/make"): thumb_make,
