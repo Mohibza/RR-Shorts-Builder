@@ -239,7 +239,7 @@ def _typing_spots(video: str, bursts: list[tuple[float, float]], moves: list, ca
     return out
 
 
-HOLD = 1.0      # seconds without a click or a key before the zoom lets go; shorter gaps just move the view
+HOLD = 0.0      # no "stay zoomed between separate clicks" window: every click gets its own zoom in and out
 TAIL = 1.2      # how long the zoom stays after the last click / key before it glides back out
 
 
