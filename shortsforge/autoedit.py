@@ -160,13 +160,19 @@ def _captions(words: list[dict], maxchars: int = 44, maxdur: float = 3.6) -> lis
     return res
 
 
-def _typing_spots(video: str, bursts: list[tuple[float, float]], moves: list, carets: list,
+def _typing_spots(video: str, bursts: list[tuple[float, float]], moves: list, carets: list, clicks: list,
                   progress: Optional[Callable[[str, float], None]] = None, cancel=None) -> list[list]:
     """Where on the screen the text appears while typing: for every burst (video time), a list of [t, x, y].
 
-    The recorder logs when keys go down, not what or where. So this LOOKS at the picture: during typing, the small
-    area that keeps changing is the text being written. (Recordings that logged the text cursor use that directly.)
-    A spot with x = None means "typing here, place unknown"."""
+    The recorder logs when keys go down, not what or where, so this works it out. In order of trust:
+      1. the text cursor, when the recorder could log it (exact, follows a long line)
+      2. the click that put the cursor there (the last click before the typing), IF the picture really changes
+         around that click while typing. A search box is like this: you click it, the letters appear in it.
+      3. the place where the picture keeps changing in the same small spot, sample after sample. This is the
+         "click Start, then the letters appear in a search field somewhere else" case, and typing after focus
+         moved by keyboard. Big redraws (a result list updating) are ignored: text is small.
+      4. the click anyway, else nothing (the caller falls back to the mouse position).
+    One steady place per burst: the view must sit still on the field, not hop about."""
     out: list[list] = []
     cap = None
     try:
@@ -199,40 +205,68 @@ def _typing_spots(video: str, bursts: list[tuple[float, float]], moves: list, ca
             progress("Finding where you typed", 0.74 + 0.1 * bi / max(1, len(bursts)))
         n = max(1, min(40, int((s1 - s0) / 1.2) + 1))
         times = [s0 + (s1 - s0) * i / n for i in range(n)] + [s1]
-        spots: list[list] = []
         known = [c for c in carets if s0 - 0.5 <= c[0] <= s1 + 0.5 and 0 <= c[1] <= 1 and 0 <= c[2] <= 1]
-        for t in times:
-            near = [c for c in known if abs(c[0] - t) <= 1.0]
-            if near:                                          # the recorder saw the text cursor: exact
-                near.sort(key=lambda c: abs(c[0] - t))
-                spots.append([t, near[0][1], near[0][2]])
-                continue
-            pos = None
-            if cv2 is not None:
-                try:
-                    if cap is None:
-                        cap = cv2.VideoCapture(video)
+        if known:                                              # 1. the recorder saw the text cursor
+            spots = []
+            for t in times:
+                c = min(known, key=lambda q: abs(q[0] - t))
+                spots.append([t, c[1], c[2]])
+            out.append(spots)
+            continue
+        anchor = next((c for c in reversed(clicks) if s0 - 15 <= c[0] <= s0 + 0.3), None)
+        place = None
+        if cv2 is not None:
+            try:
+                if cap is None:
+                    cap = cv2.VideoCapture(video)
+                k = max(3, min(12, int((s1 - s0) / 0.8) + 2))
+                hits_near, valid, found = 0, 0, []            # found: (sample number, x, y) of small changes
+                for si in range(k):
+                    t = s0 + (s1 - s0) * si / max(1, k - 1)
                     a, b = frame(t - 0.15), frame(min(s1 + 0.6, t + 0.9))
-                    if a is not None and b is not None and a.shape == b.shape:
-                        d = (cv2.absdiff(a, b) > 22).astype(np.uint8)
-                        mo = mouse_at(t + 0.4)
-                        if mo is not None:                    # the moving mouse is not the typing
-                            cv2.circle(d, (int(mo[1] * d.shape[1]), int(mo[2] * d.shape[0])), int(0.07 * d.shape[1]), 0, -1)
-                        d = cv2.morphologyEx(d, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
-                        cnt = int(d.sum())
-                        if 5 <= cnt <= 0.05 * d.size:          # a small change = text; a big one = scrolling / new window
-                            ys, xs = np.nonzero(d)
-                            pos = (float(np.median(xs)) / d.shape[1], float(np.median(ys)) / d.shape[0])
-                except Exception:
-                    pos = None
-            spots.append([t, pos[0], pos[1]] if pos else [t, None, None])
-        # one stray reading must not throw the camera across the screen: smooth with the neighbours' median
-        good = [sp for sp in spots if sp[1] is not None]
-        if good:
-            for sp in spots:
-                near = sorted(good, key=lambda g: abs(g[0] - sp[0]))[:3]
-                sp[1] = sorted(g[1] for g in near)[len(near) // 2]
-                sp[2] = sorted(g[2] for g in near)[len(near) // 2]
+                    if a is None or b is None or a.shape != b.shape:
+                        continue
+                    d = (cv2.absdiff(a, b) > 22).astype(np.uint8)
+                    mo = mouse_at(t + 0.4)
+                    if mo is not None:                        # the moving mouse is not the typing
+                        cv2.circle(d, (int(mo[1] * d.shape[1]), int(mo[2] * d.shape[0])), 12, 0, -1)
+                    H, W = d.shape
+                    valid += 1
+                    num, _lab, stats, cent = cv2.connectedComponentsWithStats(cv2.dilate(d, np.ones((3, 5), np.uint8)), connectivity=8)
+                    near = False
+                    for ci in range(1, num):
+                        cw, chh, area = stats[ci, cv2.CC_STAT_WIDTH], stats[ci, cv2.CC_STAT_HEIGHT], stats[ci, cv2.CC_STAT_AREA]
+                        if area < 6 or cw > 0.45 * W or chh > 0.07 * H:          # too big to be a few letters
+                            continue
+                        x, y = float(cent[ci][0]) / W, float(cent[ci][1]) / H
+                        found.append((si, x, y))
+                        if anchor is not None and abs(x - anchor[1]) <= 0.3 and abs(y - anchor[2]) <= 0.09:
+                            near = True
+                    hits_near += 1 if near else 0
+                if anchor is not None and valid and hits_near >= max(1, 0.3 * valid):
+                    place = (anchor[1], anchor[2])            # 2. the letters appear where the click was
+                elif found:
+                    # 3. the line that changes in the most samples (text grows along a line, so look at rows)
+                    rows: dict = {}
+                    for si, x, y in found:
+                        r = int(y * 28)
+                        for rr in (r, r - 1):                 # each change counts for its row and the one above,
+                            rows.setdefault(rr, []).append((si, x, y))        # so a line on a row border isn't split
+                    best = max(rows.values(), key=lambda v: len({q[0] for q in v}))
+                    if len({q[0] for q in best}) >= max(2, 0.4 * valid):
+                        place = (sorted(q[1] for q in best)[len(best) // 2], sorted(q[2] for q in best)[len(best) // 2])
+            except Exception:
+                place = None
+        if place is None and anchor is not None:
+            place = (anchor[1], anchor[2])                    # 4. best remaining guess
+        inside = [c for c in clicks if s0 + 0.3 < c[0] < s1]  # clicked into another field while typing
+        spots = []
+        for t in times:
+            here = place
+            for c in inside:
+                if c[0] <= t:
+                    here = (c[1], c[2])
+            spots.append([t, here[0], here[1]] if here else [t, None, None])
         out.append(spots)
     if cap is not None:
         cap.release()
@@ -317,7 +351,11 @@ def _zoom_blocks(targets: list, z: float, hold: float = HOLD) -> list[dict]:
         # is the new spot comfortably inside what the zoom shows right now (and is the zoom close enough for it)?
         if live and zt <= cur["z"] + 1e-6:
             half = 0.5 / cur["z"]
-            if abs(x - cur["cx"]) <= half * 0.72 and abs(y - cur["cy"]) <= half * 0.72:
+            # where the view would go for this spot (it can't leave the screen, so spots near an edge or a corner
+            # all lead to the same view): if that is about where it already is, there is nothing to move
+            nx, ny = min(1 - half, max(half, x)), min(1 - half, max(half, y))
+            if (abs(nx - cur["cx"]) <= half * 0.72 and abs(ny - cur["cy"]) <= half * 0.72
+                    and abs(x - cur["cx"]) <= half and abs(y - cur["cy"]) <= half):
                 cur["last"], cur["kind"], cur["burst"] = t, kind, burst
                 continue
         zb = max(zt, cur["z"]) if live and kind == "click" and cur["kind"] == "type" and burst is None else zt
@@ -528,15 +566,13 @@ def run(p: dict, opts: dict, progress: Callable[[str, float], None], cancel: Opt
         # (older recordings logged fewer key presses when typing fast, so pauses up to 4 s still count as one burst)
         bursts = [b for b in _merge([(k, k + 0.01) for k in ev["keys"]], 4.0)
                   if b[1] - b[0] >= 0.15 and to_tl(b[0]) is not None]
-        spots = _typing_spots(m["path"], bursts, ev["moves"], ev.get("carets") or [], progress, cancel) if m["kind"] == "video" \
+        spots = _typing_spots(m["path"], bursts, ev["moves"], ev.get("carets") or [], ev["clicks"], progress, cancel) if m["kind"] == "video" \
             else [[[b[0], None, None], [b[1], None, None]] for b in bursts]
-        # Typing ALWAYS gets the zoom. When the picture didn't show where the text is, use the best guess: the
-        # last click before the typing (the field that was clicked into), else where the mouse was, else the middle.
+        # Typing ALWAYS gets the zoom. If nothing told us where the text is, use where the mouse was, else the middle.
         for (s0, _s1), burst in zip(bursts, spots):
             if any(sp[1] is None for sp in burst):
-                before = [c for c in ev["clicks"] if s0 - 20 <= c[0] <= s0 + 0.3]
                 rest = [mv for mv in ev["moves"] if mv[0] <= s0]
-                gx, gy = (before[-1][1], before[-1][2]) if before else (rest[-1][1], rest[-1][2]) if rest else (0.5, 0.5)
+                gx, gy = (rest[-1][1], rest[-1][2]) if rest else (0.5, 0.5)
                 for sp in burst:
                     if sp[1] is None:
                         sp[1], sp[2] = min(1.0, max(0.0, gx)), min(1.0, max(0.0, gy))
