@@ -12,11 +12,14 @@ import { PublishPage } from "./pages/Publish";
 import { MusicPage } from "./pages/Music";
 import { SettingsPage } from "./pages/Settings";
 import { StudioPage } from "./pages/Studio";
+import { VideoEditorPage } from "./pages/VideoEditor";
+import { MenuBar } from "./components/MenuBar";
 import { get } from "./lib/api";
 
 const NAV: [string, string, string][] = [
   ["create", "Create", "spark"],
   ["studio", "Studio", "record"],
+  ["edit", "Editor", "timeline"],
   ["projects", "Clips", "grid"],
   ["library", "Library", "film"],
   ["publish", "Publish", "rocket"],
@@ -81,6 +84,7 @@ export default function App() {
   const error = useStore((s) => s.error);
   const editing = useStore((s) => s.editing);
   const version = useStore((s) => s.status?.version);
+  const compact = useStore((s) => s.page === "edit" && !!s.editProject && !s.editing);      // editor workspace: the sidebar folds to icons
   const running = useStore((s) => Object.values(s.jobs).filter((j) => j.state === "running" || j.state === "queued").length
     + Object.values(s.exports).filter((e) => e.state === "running" || e.state === "queued").length);
 
@@ -100,13 +104,15 @@ export default function App() {
   if (!ready) return <div className="boot"><div className="boot-logo"><Logo big /></div><span className="spin big" /></div>;
 
   return (
-    <div className="app">
+    <div className="shell">
+      <MenuBar />
+      <div className={`app ${compact ? "compact" : ""}`}>
       <FontFaces />
       <aside className="side">
         <Logo version={version} />
         <nav>
           {NAV.map(([k, label, ic]) => (
-            <button key={k} className={`nav ${page === k && !editing ? "on" : ""}`} onClick={() => go(k, { editing: null })}>
+            <button key={k} title={label} className={`nav ${page === k && !editing ? "on" : ""}`} onClick={() => go(k, { editing: null })}>
               <Icon name={ic} size={19} /><span>{label}</span>
               {k === "create" && running > 0 && <em className="badge">{running}</em>}
             </button>
@@ -119,12 +125,14 @@ export default function App() {
         {editing ? <Editor key={editing.project + editing.clip} pid={editing.project} cid={editing.clip} /> :
           page === "create" ? <CreatePage /> :
           page === "studio" ? <StudioPage /> :
+          page === "edit" ? <VideoEditorPage /> :
           page === "projects" ? <ProjectsPage /> :
           page === "library" ? <LibraryPage /> :
           page === "publish" ? <PublishPage /> :
           page === "music" ? <MusicPage /> : <SettingsPage />}
       </main>
       <Toasts />
+      </div>
     </div>
   );
 }

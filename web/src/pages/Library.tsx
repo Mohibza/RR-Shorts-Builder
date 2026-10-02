@@ -67,6 +67,7 @@ export function LibraryPage() {
                 <div className="row gap">
                   <Btn small kind="primary" icon="rocket" onClick={() => setPost([it.plan_file])}>Post</Btn>
                   {it.project_ref && <IconBtn icon="edit" title="Edit again" onClick={() => setState({ editing: { project: it.project_ref!.project, clip: it.project_ref!.clip } })} />}
+                  <IconBtn icon="timeline" title="Open in the video editor" onClick={() => api<{ id: string }>("/api/edit/new", { paths: [it.output] }).then((q) => setState({ page: "edit", editProject: q.id })).catch((e) => toast(e.message, "error"))} />
                   <IconBtn icon="folder" title="Show file" onClick={() => api("/api/open", { path: it.output, select: true })} />
                   <IconBtn icon="trash" danger title="Delete this Short" onClick={() => delMany([it.plan_file])} />
                 </div>

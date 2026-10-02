@@ -95,7 +95,8 @@ def _is_allowed(p: Path) -> bool:
             return True
         except ValueError:
             continue
-    return False
+    from . import veditor
+    return veditor.is_media(rp)             # files the user added to a video-editor project
 
 
 # ================================================================ native pickers
@@ -108,7 +109,9 @@ def pick_files(kind: str = "video", multi: bool = False) -> list[str]:
     filters = {"video": "Videos|*.mp4;*.mkv;*.mov;*.webm;*.avi;*.m4v;*.flv;*.wmv|All files|*.*",
                "music": "Audio|*.mp3;*.m4a;*.wav;*.ogg;*.aac;*.flac|All files|*.*",
                "cookies": "Cookies|*.txt|All files|*.*", "exe": "Programs|*.exe|All files|*.*",
-               "image": "Images|*.png;*.jpg;*.jpeg;*.webp|All files|*.*"}.get(kind, "All files|*.*")
+               "image": "Images|*.png;*.jpg;*.jpeg;*.webp|All files|*.*",
+               "media": "Video, audio and images|*.mp4;*.mkv;*.mov;*.webm;*.avi;*.m4v;*.flv;*.wmv;*.mp3;*.m4a;*.wav;"
+                        "*.ogg;*.aac;*.flac;*.png;*.jpg;*.jpeg;*.webp|All files|*.*"}.get(kind, "All files|*.*")
     if os.name == "nt":
         if kind == "folder":
             ps = ("Add-Type -AssemblyName System.Windows.Forms;$d=New-Object System.Windows.Forms.FolderBrowserDialog;"
@@ -742,6 +745,117 @@ def _make_handler(app: App):
             raise ApiError("Recording not found.", 404)
         return E.add_sources(m["video"])
 
+    # ---- video editor (long-form): projects, media, export
+    def _edit_project(pid):
+        from . import veditor
+        p = veditor.load(str(pid))
+        if p is None:
+            raise ApiError("That project no longer exists.", 404)
+        return p
+
+    def edit_list(_a):
+        from . import veditor
+        return veditor.listing()
+
+    def edit_new(a):
+        from . import recsetup, veditor
+        try:
+            if a.get("recording"):
+                m = next((x for x in recsetup.sessions(False) if x["id"] == str(a["recording"])), None)
+                if not m or not m.get("video"):
+                    raise ApiError("Recording not found.", 404)
+                old = next((x for x in veditor.listing() if x["recording"] == m["id"]), None)
+                if old and not a.get("fresh"):
+                    return veditor.load(old["id"])            # keep editing where you left off
+                return veditor.create(recording=m)
+            paths = [str(x) for x in (a.get("paths") or [])]
+            if a.get("pick"):
+                paths = pick_files("media", True)
+                if FOCUS:
+                    FOCUS()
+                if not paths:
+                    return None
+            else:
+                for x in paths:
+                    if not _is_allowed(Path(x)):
+                        raise ApiError("Not allowed.", 403)
+            return veditor.create(str(a.get("name") or ""), paths)
+        except ValueError as e:
+            raise ApiError(str(e))
+
+    def edit_get(a):
+        return _edit_project(a["id"])
+
+    def edit_save(a):
+        from . import veditor
+        new = a["project"]
+        old = _edit_project(new["id"])
+        have = {m["id"] for m in new.get("media", [])}
+        new["media"] = list(new.get("media", [])) + [m for m in old.get("media", []) if m["id"] not in have]
+        for k in ("created", "recording", "events", "markers"):
+            if k in old and k not in new:
+                new[k] = old[k]
+        veditor.save(new)
+        return {"updated": new["updated"]}
+
+    def edit_delete(a):
+        from . import veditor
+        veditor.delete(str(a["id"]))
+        return True
+
+    def edit_import(a):
+        from . import veditor
+        _edit_project(a["id"])
+        paths = [str(x) for x in (a.get("paths") or [])]
+        if not paths:
+            paths = pick_files("media", True)
+            if FOCUS:
+                FOCUS()
+        else:
+            for x in paths:
+                if not _is_allowed(Path(x)):
+                    raise ApiError("Not allowed.", 403)
+        if not paths:
+            return []
+        try:
+            return veditor.add_media(str(a["id"]), paths)
+        except ValueError as e:
+            raise ApiError(str(e))
+
+    def edit_assets(a):
+        from . import veditor
+        p = _edit_project(a["id"])
+        out = {}
+        for m in p["media"]:
+            if a.get("media") and m["id"] != a["media"]:
+                continue
+            out[m["id"]] = veditor.assets(m, E.bus.emit)
+        return out
+
+    def edit_export(a):
+        from . import veditor
+        s = Settings.load()
+        try:
+            return veditor.export(str(a["id"]), usable_output_dir(s.output_dir)[0] / "Edited videos", a, E.bus.emit,
+                                  s.encoder)
+        except ValueError as e:
+            raise ApiError(str(e))
+
+    def edit_export_cancel(a):
+        from . import veditor
+        veditor.cancel_export(str(a["export"]))
+        return True
+
+    def edit_exports(_a):
+        from . import veditor
+        return list(veditor.EXPORTS.values())
+
+    def edit_to_shorts(a):
+        f = Path(str(a["file"]))
+        if not _is_allowed(f) or not f.is_file():
+            raise ApiError("File not found.", 404)
+        return E.add_sources(str(f))
+
     # ---- thumbnails (optional): prompt + reference -> AI image, or a clean frame + title
     def _thumb_plan(a):
         pf = Path(str(a["plan_file"]))
@@ -1333,6 +1447,17 @@ def _make_handler(app: App):
         ("POST", "/api/record/update"): rec_update,
         ("POST", "/api/record/delete"): rec_delete,
         ("POST", "/api/record/to_shorts"): rec_to_shorts,
+        ("GET", "/api/edit/list"): edit_list,
+        ("POST", "/api/edit/new"): edit_new,
+        ("GET", "/api/edit/project"): edit_get,
+        ("POST", "/api/edit/save"): edit_save,
+        ("POST", "/api/edit/delete"): edit_delete,
+        ("POST", "/api/edit/import"): edit_import,
+        ("GET", "/api/edit/assets"): edit_assets,
+        ("POST", "/api/edit/export"): edit_export,
+        ("POST", "/api/edit/export/cancel"): edit_export_cancel,
+        ("GET", "/api/edit/exports"): edit_exports,
+        ("POST", "/api/edit/to_shorts"): edit_to_shorts,
         ("GET", "/api/thumb/info"): thumb_info,
         ("POST", "/api/thumb/ref"): thumb_ref,
         ("POST", "/api/thumb/make"): thumb_make,

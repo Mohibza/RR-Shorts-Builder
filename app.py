@@ -152,7 +152,10 @@ def _run_webview(webview, app, url: str) -> int:
     from shortsforge.config import data_dir
     types = {"video": ("Video files (*.mp4;*.mkv;*.mov;*.webm;*.avi;*.m4v;*.flv;*.wmv)", "All files (*.*)"),
              "music": ("Audio files (*.mp3;*.m4a;*.wav;*.ogg;*.aac;*.flac)", "All files (*.*)"),
-             "cookies": ("Cookies (*.txt)", "All files (*.*)")}
+             "cookies": ("Cookies (*.txt)", "All files (*.*)"),
+             "image": ("Images (*.png;*.jpg;*.jpeg;*.webp)", "All files (*.*)"),
+             "media": ("Video, audio and images (*.mp4;*.mkv;*.mov;*.webm;*.avi;*.m4v;*.flv;*.wmv;*.mp3;*.m4a;*.wav;"
+                       "*.ogg;*.aac;*.flac;*.png;*.jpg;*.jpeg;*.webp)", "All files (*.*)")}
     kw = dict(width=1440, height=900, min_size=(1024, 620), background_color="#07070D", text_select=True)
     try:
         win = webview.create_window("Rebels Revolt Shorts", url, maximized=True, **kw)
@@ -200,6 +203,7 @@ def _run_webview(webview, app, url: str) -> int:
         except Exception:
             pass
         _set_window_icon("Rebels Revolt Shorts")
+        _dark_titlebar("Rebels Revolt Shorts")
     try:
         win.events.shown += on_shown
     except Exception:
@@ -242,6 +246,40 @@ def _set_window_icon(title: str) -> None:
         traceback.print_exc()
 
 
+def _dark_titlebar(title: str) -> None:
+    """Make the Windows title bar part of the app: dark, in the app's own colour (Windows 11), so the menu bar
+    below it reads as one professional frame. The window keeps its normal behaviour (snap, resize, close)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        import time as _t
+        from ctypes import wintypes
+        user32, dwm = ctypes.windll.user32, ctypes.windll.dwmapi
+        user32.FindWindowW.restype = wintypes.HWND
+        hwnd = None
+        for _ in range(80):
+            hwnd = user32.FindWindowW(None, title)
+            if hwnd:
+                break
+            _t.sleep(0.1)
+        if not hwnd:
+            return
+
+        def attr(key: int, value: int) -> None:
+            v = ctypes.c_int(value)
+            dwm.DwmSetWindowAttribute(wintypes.HWND(hwnd), key, ctypes.byref(v), ctypes.sizeof(v))
+        attr(20, 1)                 # dark title bar (Windows 10 2004+ / 11)
+        attr(19, 1)                 # the same switch on older Windows 10 builds
+        attr(35, 0x00160A0B)        # caption colour  #0B0A16  (Windows 11; ignored elsewhere)
+        attr(36, 0x00FBF2F3)        # caption text    #F3F2FB
+        attr(34, 0x00241A1C)        # window border   #1C1A24
+        # nudge Windows to repaint the frame with the new colours
+        user32.SetWindowPos(wintypes.HWND(hwnd), None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0020)
+    except Exception:
+        traceback.print_exc()
+
+
 def _run_app_window(app, url: str) -> int:
     """Fallback without pywebview: Edge/Chrome in app mode (its own profile, no tabs or address bar)."""
     from shortsforge import browser_login
@@ -269,6 +307,8 @@ def _run_app_window(app, url: str) -> int:
     from shortsforge import server
     server.FOCUS = lambda: None
     server.QUIT = proc.terminate
+    import threading
+    threading.Thread(target=_dark_titlebar, args=("Rebels Revolt Shorts",), daemon=True).start()
     proc.wait()
     return 0
 

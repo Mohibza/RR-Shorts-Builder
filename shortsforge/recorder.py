@@ -581,9 +581,19 @@ def finalize(sdir: Path) -> dict:
         sysw = sdir / "system.wav"
         if sysw.exists() or _concat_wav([sdir / s["sys"] for s in segs if s.get("sys")], sysw):
             meta["system"] = str(sysw)
-        cam = sdir / "webcam.mkv"
-        if cam.exists() or _concat(ffmpeg, [sdir / s["cam"] for s in segs if s.get("cam")], cam):
-            meta["webcam"] = str(cam)
+        cam, cam4 = sdir / "webcam.mkv", sdir / "webcam.mp4"
+        if cam4.exists() and not cam.exists():
+            meta["webcam"] = str(cam4)
+        elif cam.exists() or _concat(ffmpeg, [sdir / s["cam"] for s in segs if s.get("cam")], cam):
+            r = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(cam), "-c", "copy",
+                                str(sdir / "webcam.part.mp4")], capture_output=True, creationflags=NO_WINDOW)
+            if r.returncode == 0 and (sdir / "webcam.part.mp4").exists():
+                (sdir / "webcam.part.mp4").replace(cam4)
+                cam.unlink(missing_ok=True)
+                meta["webcam"] = str(cam4)
+            else:
+                (sdir / "webcam.part.mp4").unlink(missing_ok=True)
+                meta["webcam"] = str(cam)
         if (sdir / "events.jsonl").exists():
             meta["events"] = str(sdir / "events.jsonl")
         poster = sdir / "poster.jpg"

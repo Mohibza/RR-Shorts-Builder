@@ -53,7 +53,7 @@ export function connectEvents(onEvent: Handler, onState: (up: boolean) => void):
   let closed = false;
   const kinds = ["log", "job", "export", "project", "clip_camera", "library", "queue", "upload", "status",
     "settings", "accounts", "signin", "connect", "watch", "toast", "license", "expanding", "expanded",
-    "job_removed", "jobs_cleared"];
+    "job_removed", "jobs_cleared", "edit"];
   const open = () => {
     if (closed) return;
     es = new EventSource(`/api/events?t=${encodeURIComponent(TOKEN)}`);

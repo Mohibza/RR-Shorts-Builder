@@ -23,7 +23,7 @@ datas += [("assets", "assets"), ("web/dist", "web/dist")]
 hiddenimports += ["shortsforge.license_pub", "shortsforge.ed25519", "shortsforge.licensing", "shortsforge.vibe",
                   "shortsforge.music_index", "shortsforge.selftest", "shortsforge.server", "shortsforge.engine", "shortsforge.projects",
                   "shortsforge.virality", "shortsforge.musicgen", "shortsforge.proxy", "shortsforge.webupload",
-                  "shortsforge.uploadqueue", "shortsforge.browser_login", "shortsforge.story", "shortsforge.cutout", "shortsforge.thumbnail", "shortsforge.recorder", "shortsforge.recsetup", "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSvg"]
+                  "shortsforge.uploadqueue", "shortsforge.browser_login", "shortsforge.story", "shortsforge.cutout", "shortsforge.thumbnail", "shortsforge.recorder", "shortsforge.recsetup", "shortsforge.veditor", "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSvg"]
 for pkg in ("webview", "clr_loader", "pythonnet", "soundcard", "cffi"):     # the app window (WebView2); optional
     try:
         d, b, h = collect_all(pkg)

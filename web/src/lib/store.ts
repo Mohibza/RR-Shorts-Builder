@@ -14,12 +14,13 @@ export type State = {
   uploads: Record<string, number>; libraryTick: number; projectTick: Record<string, number>;
   cameras: Record<string, { camera: [number, number][]; framing?: string }>;
   page: string; settingsSec?: string; openProject: string; editing: { project: string; clip: string } | null;
+  editProject: string; editName: string; editDirty: boolean;
 };
 
 let state: State = {
   ready: false, online: false, error: "", status: null, settings: {}, catalog: null, jobs: {}, exports: {},
   projects: [], accounts: {}, queue: [], logs: [], toasts: [], signins: {}, connect: {}, uploads: {},
-  libraryTick: 0, projectTick: {}, cameras: {}, page: "create", openProject: "", editing: null,
+  libraryTick: 0, projectTick: {}, cameras: {}, page: "create", openProject: "", editing: null, editProject: "", editName: "", editDirty: false,
 };
 const subs = new Set<() => void>();
 
@@ -138,6 +139,9 @@ export function startEvents() {
         break;
       case "license":
         toast(data.text, "error", { label: "Enter key", run: () => go("settings", { settingsSec: "license" }) });
+        break;
+      case "edit":            // video editor: previews ready, export progress
+        window.dispatchEvent(new CustomEvent("rr-edit", { detail: data }));
         break;
       case "watch":
         if (data.found) toast(`Auto-watch found ${data.found} new video(s)`, "ok");

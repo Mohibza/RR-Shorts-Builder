@@ -156,7 +156,8 @@ export function StudioPage() {
               <span className="muted small">{timeAgo(r.created)}{r.width ? ` · ${r.width}×${r.height}` : ""}{r.mic ? " · mic" : ""}{r.system ? " · PC sound" : ""}{r.webcam ? " · webcam" : ""}{r.markers?.length ? ` · ${r.markers.length} marker${r.markers.length > 1 ? "s" : ""}` : ""}{r.recovered ? " · recovered" : ""}</span>
               {r.notes?.map((n, i) => <small key={i} className="rec-note">{n}</small>)}
               <div className="row gap wrap">
-                {r.video && <Btn small kind="primary" icon="scissors" onClick={() => api("/api/record/to_shorts", { id: r.id }).then(() => { toast("Finding the best moments for Shorts…", "ok"); go("create"); }).catch((e) => toast(e.message, "error"))}>Make Shorts</Btn>}
+                {r.video && <Btn small kind="primary" icon="timeline" onClick={() => api<{ id: string }>("/api/edit/new", { recording: r.id }).then((q) => go("edit", { editProject: q.id })).catch((e) => toast(e.message, "error"))}>Edit</Btn>}
+                {r.video && <Btn small icon="scissors" onClick={() => api("/api/record/to_shorts", { id: r.id }).then(() => { toast("Finding the best moments for Shorts…", "ok"); go("create"); }).catch((e) => toast(e.message, "error"))}>Make Shorts</Btn>}
                 {r.video && <Btn small icon="play" onClick={() => setPlay(r)}>Play</Btn>}
                 <IconBtn icon="folder" title="Show files" onClick={() => api("/api/open", { path: r.video || r.dir, select: !!r.video })} />
                 <IconBtn icon="trash" danger title="Delete" onClick={() => { if (confirm("Delete this recording from your computer?")) api("/api/record/delete", { id: r.id }).then(load); }} />
