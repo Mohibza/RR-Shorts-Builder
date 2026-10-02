@@ -13,12 +13,12 @@ export type El = { id: string; kind: "zoom" | "text" | "shape" | "caption"; star
   text?: string; font?: string; size?: number; color?: string; bold?: boolean; italic?: boolean; upper?: boolean; stroke?: number; stroke_color?: string; shadow?: number;
   box?: boolean; box_color?: string; box_alpha?: number; box_pad?: number; spacing?: number;
   shape?: string; x?: number; y?: number; w?: number; h?: number; rot?: number; width?: number; alpha?: number; n?: number; strength?: number; text_color?: string;
-  anim_in?: Anim; anim_out?: Anim };
+  anim_in?: Anim; anim_out?: Anim; anim_loop?: Anim };
 export type CursorFx = { media: string; events: string; offset?: number; ripple?: boolean; ripple_color?: string; highlight?: boolean; highlight_color?: string; spotlight?: boolean; size?: number };
 export type Events = { clicks: [number, number, number, string][]; moves: [number, number, number][]; keys: number[] };
 export type Item = { id: string; track: string; media: string; start: number; in: number; out: number; speed: number;
   volume: number; muted: boolean; fade_in: number; fade_out: number; x: number; y: number; scale: number; rot: number;
-  opacity: number; crop: [number, number, number, number]; fx?: Fx; enter?: Trans; exit?: Trans; tail?: number; afx?: { denoise?: boolean; level?: boolean }; auto?: string };
+  opacity: number; crop: [number, number, number, number]; fx?: Fx; enter?: Trans; exit?: Trans; tail?: number; motion?: string; afx?: { denoise?: boolean; level?: boolean }; auto?: string };
 export type EProject = { id: string; name: string; created: number; updated: number; width: number; height: number;
   fps: number; bg: string; media: Media[]; tracks: Track[]; items: Item[]; markers?: number[]; recording?: string;
   els?: El[]; cursor?: CursorFx; captions?: El; chapters?: { t: number; title: string }[]; auto?: Record<string, any> };
@@ -156,6 +156,10 @@ export const LOOKS: Record<string, [string, Fx]> = {
   matte: ["Matte", { contrast: 0.9, lift: 0.09, sat: 0.92 }], faded: ["Faded", { contrast: 0.84, lift: 0.12, sat: 0.8 }], punchy: ["Punchy", { contrast: 1.18, sat: 1.45 }],
   dream: ["Dream", { contrast: 0.95, bright: 0.04, sat: 1.1, blur: 0.6 }], night: ["Night", { temp: -0.2, bright: -0.07, sat: 0.85, contrast: 1.1, vignette: 0.3 }],
   pastel: ["Pastel", { sat: 0.74, bright: 0.05, contrast: 0.92, lift: 0.04 }], crisp: ["Crisp", { contrast: 1.06, sat: 1.08, sharpen: 0.6 }],
+  sepia: ["Sepia", { sat: 0.25, temp: 0.3, contrast: 1.05, lift: 0.03 }], sunset: ["Sunset", { temp: 0.26, tint: 0.08, sat: 1.25, contrast: 1.06, vignette: 0.2 }],
+  emerald: ["Emerald", { tint: -0.14, temp: -0.04, sat: 1.12, contrast: 1.05 }], cyber: ["Cyber", { temp: -0.16, tint: 0.16, sat: 1.4, contrast: 1.14 }],
+  bleach: ["Bleach", { sat: 0.55, contrast: 1.3, bright: 0.02 }], moody: ["Moody", { bright: -0.06, contrast: 1.16, sat: 0.85, vignette: 0.45 }],
+  glow: ["Soft glow", { bright: 0.05, contrast: 0.96, sat: 1.15, blur: 0.25, lift: 0.03 }],
 };
 const FX0 = { bright: 0, contrast: 1, sat: 1, temp: 0, tint: 0, lift: 0, blur: 0, vignette: 0, grain: 0, sharpen: 0 };
 export function fxValues(fx?: Fx) {
@@ -186,7 +190,7 @@ export function animAt(e: El, t: number, H: number) {
   const d = e.dur, u0 = t - e.start;
   const ain = e.anim_in?.type && e.anim_in.type !== "none" ? e.anim_in : null, aout = e.anim_out?.type && e.anim_out.type !== "none" ? e.anim_out : null;
   const di = ain ? Math.min(ain.dur || 0.4, d / 2) : 0, dout = aout ? Math.min(aout.dur || 0.4, d / 2) : 0;
-  const s = { op: 1, dx: 0, dy: 0, sc: 1, rot: 0, blur: 0 };
+  const s = { op: 1, dx: 0, dy: 0, sc: 1, sx: 1, sy: 1, rot: 0, blur: 0, chars: -1 };
   const off = 0.06 * H;
   if (ain && u0 < di) {
     const u = clamp(u0 / di, 0, 1), fade = Math.min(1, u / 0.6);
@@ -200,6 +204,11 @@ export function animAt(e: El, t: number, H: number) {
       case "zoom": s.sc = 1.65 - 0.65 * Math.sqrt(u); s.op = fade; break;
       case "blur": s.blur = 14 * (1 - u); s.op = u; break;
       case "spin": s.rot = -14 * (1 - Math.sqrt(u)); s.sc = 0.8 + 0.2 * Math.sqrt(u); s.op = fade; break;
+      case "drop": s.dy = -2.2 * off * (1 - u); s.op = fade; break;
+      case "stretch": s.sx = Math.sqrt(u); s.op = fade; break;
+      case "flip": s.sy = Math.sqrt(u); s.op = fade; break;
+      case "bounce": s.sc = u < 0.45 ? 0.3 + 0.88 * (u / 0.45) : u < 0.7 ? 1.18 - 0.26 * ((u - 0.45) / 0.25) : u < 0.85 ? 0.92 + 0.12 * ((u - 0.7) / 0.15) : 1.04 - 0.04 * ((u - 0.85) / 0.15); s.op = Math.min(1, u / 0.3); break;
+      case "type": s.chars = u; break;
       default: s.op = u;
     }
   } else if (aout && u0 > d - dout) {
@@ -213,7 +222,23 @@ export function animAt(e: El, t: number, H: number) {
       case "pop": s.sc = 1 - 0.45 * u; s.op = fade; break;
       case "zoom": s.sc = 1 + 0.65 * u * u; s.op = fade; break;
       case "blur": s.blur = 14 * u; s.op = 1 - u; break;
+      case "spin": s.rot = 14 * u * u; s.sc = 1 - 0.2 * u * u; s.op = fade; break;
+      case "drop": s.dy = 2.2 * off * u; s.op = fade; break;
+      case "stretch": s.sx = 1 - u * u; s.op = fade; break;
+      case "flip": s.sy = 1 - u * u; s.op = fade; break;
       default: s.op = 1 - u;
+    }
+  } else if (e.anim_loop?.type && LOOP_PERIOD[e.anim_loop.type]) {      // keeps moving while it is on screen
+    const P = LOOP_PERIOD[e.anim_loop.type], hold = d - di - dout, th = u0 - di;
+    if (hold >= P && th < Math.min(150, Math.floor(hold / P)) * P) {
+      const f = (th % P) / P, tri = (pts: [number, number][]) => { let pf = 0, pv = 0; for (const [x, v] of pts) { if (f <= x) return pv + (v - pv) * ((f - pf) / (x - pf)); pf = x; pv = v; } return pv; };
+      switch (e.anim_loop.type) {
+        case "pulse": s.sc = 1 + tri([[0.5, 0.06], [1, 0]]); break;
+        case "heartbeat": s.sc = 1 + tri([[0.1, 0.12], [0.25, 0], [0.35, 0.08], [0.5, 0], [1, 0]]); break;
+        case "wiggle": s.rot = -tri([[0.25, 3], [0.75, -3], [1, 0]]); break;
+        case "swing": s.rot = -tri([[0.25, 7], [0.75, -7], [1, 0]]); break;
+        case "blink": s.op = 1 - tri([[0.5, 0.7], [1, 0]]); break;
+      }
     }
   }
   return s;
@@ -221,13 +246,15 @@ export function animAt(e: El, t: number, H: number) {
 
 /** Clip entrance / exit at time t: offset as a share of the canvas, size multiplier, opacity multiplier. */
 export function transAt(it: Item, t: number) {
-  const d = itemDur(it), u0 = t - it.start, s = { dx: 0, dy: 0, sc: 1, op: 1 };
+  const d = itemDur(it), u0 = t - it.start, s = { dx: 0, dy: 0, sc: 1, op: 1, tint: "", ta: 0 };
+  if (it.motion === "push") s.sc += 0.12 * clamp(u0 / d, 0, 1); else if (it.motion === "pull") s.sc += 0.12 * (1 - clamp(u0 / d, 0, 1));
   for (const [tr, leaving] of [[it.enter, false], [it.exit, true]] as [Trans | undefined, boolean][]) {
     if (!tr?.type || tr.type === "none") continue;
     const dd = Math.min(tr.dur || 0.5, d / 2);
     const lin = leaving ? clamp((u0 - (d - dd)) / dd, 0, 1) : clamp(1 - u0 / dd, 0, 1), p = lin * lin;
-    if (tr.type === "fade" || tr.type === "zoom") s.op *= leaving ? clamp((d - u0) / dd, 0, 1) : clamp(u0 / dd, 0, 1);
-    if (tr.type === "zoom") s.sc += 0.3 * p;
+    if (tr.type === "fade" || tr.type === "zoom" || tr.type === "grow") s.op *= leaving ? clamp((d - u0) / dd, 0, 1) : clamp(u0 / dd, 0, 1);
+    if (tr.type === "zoom") s.sc += 0.3 * p; else if (tr.type === "grow") s.sc -= 0.45 * p;
+    if ((tr.type === "flash" || tr.type === "dip") && lin > 0) { s.tint = tr.type === "flash" ? "#fff" : "#000"; s.ta = Math.max(s.ta, lin); }
     const dir = tr.type.replace("slide-", ""), sg = leaving ? -1 : 1;
     if (dir === "left") s.dx += sg * p; else if (dir === "right") s.dx -= sg * p; else if (dir === "up") s.dy += sg * p; else if (dir === "down") s.dy -= sg * p;
   }
@@ -262,9 +289,15 @@ export function shapePath(kind: string, w: number, h: number, sw: number): strin
   return rectD(w, h);
 }
 
-export const ANIMS_IN: [string, string][] = [["none", "None"], ["fade", "Fade"], ["pop", "Pop"], ["up", "Slide up"], ["down", "Slide down"], ["left", "Slide from right"], ["right", "Slide from left"], ["zoom", "Zoom in"], ["blur", "Blur in"], ["spin", "Spin in"]];
-export const ANIMS_OUT: [string, string][] = [["none", "None"], ["fade", "Fade"], ["pop", "Shrink"], ["up", "Slide up"], ["down", "Slide down"], ["left", "Slide left"], ["right", "Slide right"], ["zoom", "Zoom out"], ["blur", "Blur out"]];
-export const TRANSITIONS: [string, string][] = [["none", "None"], ["fade", "Fade"], ["slide-left", "Slide from right"], ["slide-right", "Slide from left"], ["slide-up", "Slide from bottom"], ["slide-down", "Slide from top"], ["zoom", "Zoom"]];
+export const LOOP_PERIOD: Record<string, number> = { pulse: 0.9, heartbeat: 1.2, wiggle: 0.5, swing: 1.6, blink: 0.8 };
+export const ANIMS_IN: [string, string][] = [["none", "None"], ["fade", "Fade"], ["pop", "Pop"], ["bounce", "Bounce"], ["type", "Typewriter"], ["up", "Slide up"], ["down", "Slide down"], ["left", "Slide from right"], ["right", "Slide from left"],
+  ["drop", "Drop in"], ["zoom", "Zoom in"], ["blur", "Blur in"], ["spin", "Spin in"], ["stretch", "Stretch open"], ["flip", "Flip open"]];
+export const ANIMS_OUT: [string, string][] = [["none", "None"], ["fade", "Fade"], ["pop", "Shrink"], ["up", "Slide up"], ["down", "Slide down"], ["left", "Slide left"], ["right", "Slide right"], ["drop", "Drop away"], ["zoom", "Zoom out"],
+  ["blur", "Blur out"], ["spin", "Spin out"], ["stretch", "Squeeze shut"], ["flip", "Flip shut"]];
+export const ANIMS_LOOP: [string, string][] = [["none", "None"], ["pulse", "Pulse"], ["heartbeat", "Heartbeat"], ["wiggle", "Wiggle"], ["swing", "Swing"], ["blink", "Blink"]];
+export const TRANSITIONS: [string, string][] = [["none", "None"], ["fade", "Fade"], ["slide-left", "Slide from right"], ["slide-right", "Slide from left"], ["slide-up", "Slide from bottom"], ["slide-down", "Slide from top"], ["zoom", "Zoom"],
+  ["grow", "Grow"], ["flash", "Flash white"], ["dip", "Dip to black"]];
+export const MOTIONS: [string, string][] = [["none", "Still"], ["push", "Slow push in"], ["pull", "Slow pull out"]];
 export const TEXT_PRESETS: { key: string; name: string; el: Partial<El> }[] = [
   { key: "title", name: "Title", el: { text: "Your title", font: "Poppins Black", size: 0.1, color: "#FFFFFF", stroke: 0, shadow: 5, y: 0.45, pin: true, anim_in: { type: "pop", dur: 0.5 }, anim_out: { type: "fade", dur: 0.3 } } },
   { key: "subtitle", name: "Subtitle", el: { text: "A line that explains it", font: "Poppins", size: 0.045, color: "#E9E7FA", shadow: 3, y: 0.58, pin: true, anim_in: { type: "up", dur: 0.4 }, anim_out: { type: "fade", dur: 0.3 } } },
@@ -275,6 +308,10 @@ export const TEXT_PRESETS: { key: string; name: string; el: Partial<El> }[] = [
   { key: "note", name: "Side note", el: { text: "Tip: you can undo this", font: "Lato", size: 0.034, color: "#FFFFFF", box: true, box_color: "#15141F", box_alpha: 0.9, box_pad: 14, x: 0.8, y: 0.14, pin: true, anim_in: { type: "left", dur: 0.4 }, anim_out: { type: "right", dur: 0.3 } } },
   { key: "quote", name: "Quote", el: { text: "“Something worth\nremembering.”", font: "Abril Fatface", size: 0.075, color: "#FFFFFF", shadow: 4, pin: true, anim_in: { type: "fade", dur: 0.6 }, anim_out: { type: "fade", dur: 0.5 } } },
   { key: "marker", name: "Marker pen", el: { text: "Don't skip this", font: "Permanent Marker", size: 0.07, color: "#FF3D6E", rot: -4, stroke: 5, stroke_color: "#FFFFFF", pin: false, anim_in: { type: "spin", dur: 0.4 }, anim_out: { type: "fade", dur: 0.25 } } },
+  { key: "typer", name: "Typewriter", el: { text: "Typing it out, letter by letter", font: "Special Elite", size: 0.05, color: "#FFFFFF", box: true, box_color: "#101018", box_alpha: 0.85, box_pad: 16, pin: true, anim_in: { type: "type", dur: 1.6 }, anim_out: { type: "fade", dur: 0.3 } } },
+  { key: "cta", name: "Pulsing button", el: { text: "SUBSCRIBE", font: "Poppins Black", size: 0.05, color: "#FFFFFF", box: true, box_color: "#FF3D6E", box_alpha: 1, box_pad: 18, x: 0.84, y: 0.86, pin: true, anim_in: { type: "bounce", dur: 0.6 }, anim_loop: { type: "pulse", dur: 0 }, anim_out: { type: "pop", dur: 0.3 } } },
+  { key: "stat", name: "Big number", el: { text: "10×", font: "Bebas Neue", size: 0.24, color: "#FFD400", shadow: 6, pin: true, anim_in: { type: "bounce", dur: 0.6 }, anim_loop: { type: "heartbeat", dur: 0 }, anim_out: { type: "zoom", dur: 0.3 } } },
+  { key: "sticker", name: "Sticker", el: { text: "NEW!", font: "Luckiest Guy", size: 0.08, color: "#101018", box: true, box_color: "#FFD400", box_alpha: 1, box_pad: 14, rot: -8, x: 0.82, y: 0.16, pin: true, anim_in: { type: "spin", dur: 0.45 }, anim_loop: { type: "wiggle", dur: 0 }, anim_out: { type: "spin", dur: 0.3 } } },
   { key: "neon", name: "Neon", el: { text: "NEW", font: "Bungee", size: 0.11, color: "#2FD3FF", stroke: 3, stroke_color: "#8A3BFF", shadow: 6, pin: true, anim_in: { type: "blur", dur: 0.45 }, anim_out: { type: "zoom", dur: 0.3 } } },
 ];
 export const SHAPES: { key: string; name: string; el: Partial<El> }[] = [

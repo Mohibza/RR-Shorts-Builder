@@ -399,7 +399,7 @@ _PLAIN = ("x", "y", "scale", "rot", "opacity", "crop", "fx", "volume", "muted", 
 def _plain(it: dict) -> bool:
     return (abs(float(it.get("speed") or 1) - 1) < 1e-6 and not it.get("fade_in") and not it.get("fade_out")
             and not (it.get("enter") or {}).get("type") and not (it.get("exit") or {}).get("type")
-            and not it.get("tail"))
+            and not it.get("tail") and not it.get("motion"))
 
 
 def _units(items: list[dict], fps: int) -> list[list[dict]]:
@@ -489,8 +489,8 @@ def build(p: dict, out_file: str, width: int = 0, height: int = 0, fps: int = 0,
         k = n_in
         n_in += 1
         ent, ext = it.get("enter") or {}, it.get("exit") or {}
-        fi = min(max(float(it.get("fade_in") or 0), float(ent.get("dur") or 0.5) if ent.get("type") in ("fade", "zoom") else 0), dur / 2)
-        fo = min(max(float(it.get("fade_out") or 0), float(ext.get("dur") or 0.5) if ext.get("type") in ("fade", "zoom") else 0), dur / 2)
+        fi = min(max(float(it.get("fade_in") or 0), float(ent.get("dur") or 0.5) if ent.get("type") in ("fade", "zoom", "grow") else 0), dur / 2)
+        fo = min(max(float(it.get("fade_out") or 0), float(ext.get("dur") or 0.5) if ext.get("type") in ("fade", "zoom", "grow") else 0), dur / 2)
         if visual:
             l, t, r, b = [min(0.9, max(0.0, float(v))) for v in (it.get("crop") or [0, 0, 0, 0])]
             cw, ch = max(2.0, m["width"] * (1 - l - r)), max(2.0, m["height"] * (1 - t - b))
@@ -515,11 +515,11 @@ def build(p: dict, out_file: str, width: int = 0, height: int = 0, fps: int = 0,
                 c.append(f"crop=iw*{1 - l - r:.5f}:ih*{1 - t - b:.5f}:iw*{l:.5f}:ih*{t:.5f}")
             c += vfx.fx_filters(it.get("fx"))
             x_off, y_off, zoomy = vfx.enter_exit(it, dur, W, H)
-            if zoomy:
-                M = vfx.scale_anim(it, dur, "t")
-                c.append(f"scale=w='2*trunc({w}*{M}/2)':h='2*trunc({h}*{M}/2)':eval=frame:flags=bicubic")
-            else:
-                c.append(f"scale={w}:{h}:flags=bicubic")
+            c.append(f"scale={w}:{h}:flags=bicubic")
+            for tr_, way, at in ((ent, "in", 0.0), (ext, "out", None)):       # flash to white / dip to black
+                if tr_.get("type") in ("flash", "dip"):
+                    d_ = min(float(tr_.get("dur") or 0.5), dur / 2)
+                    c.append(f"fade=t={way}:st={(dur - d_) if at is None else 0:.3f}:d={d_:.3f}:c={'white' if tr_['type'] == 'flash' else 'black'}")
             alpha = abs(rot) > 0.01 or op < 0.999 or fi > 0 or fo > 0 or m["path"].lower().endswith((".png", ".webp"))
             if alpha:
                 c.append("format=rgba")
@@ -532,12 +532,20 @@ def build(p: dict, out_file: str, width: int = 0, height: int = 0, fps: int = 0,
                     c.append(f"fade=t=in:st=0:d={fi:.3f}:alpha=1")
                 if fo > 0:
                     c.append(f"fade=t=out:st={dur - fo:.3f}:d={fo:.3f}:alpha=1")
+            wr, hr = w, h
+            if abs(rot) > 0.01:
+                a = math.radians(rot)
+                wr, hr = w * abs(math.cos(a)) + h * abs(math.sin(a)), w * abs(math.sin(a)) + h * abs(math.cos(a))
+            if zoomy:                                # a size that changes every frame must be the very last step:
+                M = vfx.scale_anim(it, dur, "t")     # anything after it would lock the first frame's size
+                c.append("format=yuva420p" if alpha else "format=yuv420p")
+                c.append(f"scale=w='2*trunc(iw*{M}/2)':h='2*trunc(ih*{M}/2)':eval=frame:flags=bicubic")
             c.append(f"setpts=PTS+{st:.3f}/TB")
             graph.append(f"[{k}:v]" + ",".join(c) + f"[v{k}]")
             cx, cy = float(it.get("x", 0.5)) * W, float(it.get("y", 0.5)) * H
             if zoomy:                                # the size changes every frame: centre it by the same formula
                 M = vfx.scale_anim(it, dur, f"(t-{st:.3f})")
-                xs, ys = f"{cx:.2f}-{w}*{M}/2", f"{cy:.2f}-{h}*{M}/2"
+                xs, ys = f"{cx:.2f}-{wr:.1f}*{M}/2", f"{cy:.2f}-{hr:.1f}*{M}/2"
             else:
                 xs, ys = f"{cx:.2f}-w/2", f"{cy:.2f}-h/2"
             ov = (f"overlay=x='{xs}{x_off}':y='{ys}{y_off}':eof_action=pass:"

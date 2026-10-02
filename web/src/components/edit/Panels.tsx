@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { mediaUrl } from "../../lib/api";
 import { toast, useStore } from "../../lib/store";
-import { ANIMS_IN, ANIMS_OUT, Assets, clamp, El, EProject, Fx, Item, itemEnd, LOOKS, Media, SHAPES, tc, TEXT_PRESETS, TRANSITIONS } from "../../lib/edit";
+import { ANIMS_IN, ANIMS_LOOP, ANIMS_OUT, MOTIONS, Assets, clamp, El, EProject, Fx, Item, itemEnd, LOOKS, Media, SHAPES, tc, TEXT_PRESETS, TRANSITIONS } from "../../lib/edit";
 import { Icon } from "../Icon";
 import { Btn, Field, Progress, Seg, Select, Toggle } from "../ui";
 
@@ -145,6 +145,8 @@ function ClipTab({ p, items, commit }: { p: EProject; items: Item[]; commit: Com
       <Select value={it.enter?.type || "none"} options={TRANSITIONS} onChange={(v) => set({ enter: { type: v, dur: it.enter?.dur || 0.5 } }, "en")} />
       {it.enter?.type && it.enter.type !== "none" && <Num label="Length" unit="s" min={0.1} max={2} step={0.05} value={it.enter.dur} onChange={(v) => set({ enter: { ...it.enter!, dur: v } }, "end")} />}
       {prev && <Btn small icon="layout" onClick={cross}>Cross-dissolve from the previous clip</Btn>}
+      <h4>Movement</h4>
+      <Seg value={it.motion || "none"} options={MOTIONS} onChange={(v) => set({ motion: v }, "mo")} />
       <h4>Transition out</h4>
       <Select value={it.exit?.type || "none"} options={TRANSITIONS.map(([k, n]) => [k, n.replace("from", "to")] as [string, string])} onChange={(v) => set({ exit: { type: v, dur: it.exit?.dur || 0.5 } }, "ex")} />
       {it.exit?.type && it.exit.type !== "none" && <Num label="Length" unit="s" min={0.1} max={2} step={0.05} value={it.exit.dur} onChange={(v) => set({ exit: { ...it.exit!, dur: v } }, "exd")} />}
@@ -202,6 +204,7 @@ export function ElProps({ p, e, commit }: { p: EProject; e: El; commit: Commit }
       <h4>Animation</h4>
       <Field label="In"><Select value={e.anim_in?.type || "none"} options={ANIMS_IN} onChange={(v) => set({ anim_in: { type: v, dur: e.anim_in?.dur || 0.4 } }, "ai")} /></Field>
       {e.anim_in?.type && e.anim_in.type !== "none" && <Num label="In" unit="s" min={0.1} max={2} step={0.05} value={e.anim_in.dur} onChange={(v) => set({ anim_in: { ...e.anim_in!, dur: v } }, "aid")} />}
+      <Field label="While showing"><Select value={e.anim_loop?.type || "none"} options={ANIMS_LOOP} onChange={(v) => set({ anim_loop: { type: v, dur: 0 } }, "al")} /></Field>
       <Field label="Out"><Select value={e.anim_out?.type || "none"} options={ANIMS_OUT} onChange={(v) => set({ anim_out: { type: v, dur: e.anim_out?.dur || 0.4 } }, "ao")} /></Field>
       {e.anim_out?.type && e.anim_out.type !== "none" && <Num label="Out" unit="s" min={0.1} max={2} step={0.05} value={e.anim_out.dur} onChange={(v) => set({ anim_out: { ...e.anim_out!, dur: v } }, "aod")} />}
     </>

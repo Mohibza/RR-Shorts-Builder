@@ -184,9 +184,19 @@ def _zoom_blocks(clicks: list, keys: list, moves: list, z: float) -> list[dict]:
             blocks.append([(t, x, y)])
     out, prev_end = [], 0.0
     lo, hi = 0.5 / z, 1 - 0.5 / z
-    for b in blocks:
+    ks = sorted(keys)
+    for i, b in enumerate(blocks):
         start = max(prev_end, b[0][0] - 0.7)
-        end = b[-1][0] + 1.7
+        # hold the zoom for as long as the typing goes on: follow the key presses until they stop for 2.5 s
+        last = b[-1][0]
+        for k in ks:
+            if k > last + 2.5:
+                break
+            if k > last:
+                last = k
+        end = last + 1.5
+        if i + 1 < len(blocks):                               # but hand over to the next spot when a click goes elsewhere
+            end = min(end, max(b[-1][0] + 1.0, blocks[i + 1][0][0] - 0.7))
         if end - start < 1.2:
             continue
         cx = min(hi, max(lo, sum(q[1] for q in b) / len(b)))

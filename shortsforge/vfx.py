@@ -106,6 +106,13 @@ LOOKS: dict[str, dict] = {
     "night": {"temp": -0.2, "bright": -0.07, "sat": 0.85, "contrast": 1.1, "vignette": 0.3},
     "pastel": {"sat": 0.74, "bright": 0.05, "contrast": 0.92, "lift": 0.04},
     "crisp": {"contrast": 1.06, "sat": 1.08, "sharpen": 0.6},
+    "sepia": {"sat": 0.25, "temp": 0.3, "contrast": 1.05, "lift": 0.03},
+    "sunset": {"temp": 0.26, "tint": 0.08, "sat": 1.25, "contrast": 1.06, "vignette": 0.2},
+    "emerald": {"tint": -0.14, "temp": -0.04, "sat": 1.12, "contrast": 1.05},
+    "cyber": {"temp": -0.16, "tint": 0.16, "sat": 1.4, "contrast": 1.14},
+    "bleach": {"sat": 0.55, "contrast": 1.3, "bright": 0.02},
+    "moody": {"bright": -0.06, "contrast": 1.16, "sat": 0.85, "vignette": 0.45},
+    "glow": {"bright": 0.05, "contrast": 0.96, "sat": 1.15, "blur": 0.25, "lift": 0.03},
 }
 FX_DEFAULT = {"bright": 0.0, "contrast": 1.0, "sat": 1.0, "temp": 0.0, "tint": 0.0, "lift": 0.0, "blur": 0.0,
               "vignette": 0.0, "grain": 0.0, "sharpen": 0.0}
@@ -234,6 +241,18 @@ def anim_tags(kind: str, d_ms: int, leaving: bool, x: float, y: float, H: int, a
             return f"\\pos({x:.1f},{y:.1f})\\blur14\\t(0,{d_ms},\\blur0){hid}\\t(0,{d_ms},{vis})"
         if kind == "spin":
             return f"\\pos({x:.1f},{y:.1f})\\frz{{R+14}}\\fscx80\\fscy80\\t(0,{d_ms},0.5,\\frz{{R}}\\fscx100\\fscy100){fade}"
+        if kind == "drop":
+            return f"\\move({x:.1f},{y - 2.2 * off:.1f},{x:.1f},{y:.1f},0,{d_ms}){fade}"
+        if kind == "stretch":
+            return f"\\pos({x:.1f},{y:.1f})\\fscx0\\t(0,{d_ms},0.5,\\fscx100){fade}"
+        if kind == "flip":
+            return f"\\pos({x:.1f},{y:.1f})\\fscy0\\t(0,{d_ms},0.5,\\fscy100){fade}"
+        if kind == "bounce":
+            a, b, c = int(d_ms * 0.45), int(d_ms * 0.7), int(d_ms * 0.85)
+            return (f"\\pos({x:.1f},{y:.1f})\\fscx30\\fscy30\\t(0,{a},\\fscx118\\fscy118)\\t({a},{b},\\fscx92\\fscy92)"
+                    f"\\t({b},{c},\\fscx104\\fscy104)\\t({c},{d_ms},\\fscx100\\fscy100){hid}\\t(0,{int(d_ms * 0.3)},{vis})")
+        if kind == "type":                              # typewriter: the letters themselves are timed in staged()
+            return f"\\pos({x:.1f},{y:.1f}){vis}\\2a&HFF&\\4a&HFF&"
         return f"\\pos({x:.1f},{y:.1f}){hid}\\t(0,{d_ms},{vis})"
     start = d_ms - half
     fade = f"{vis}\\t({start},{d_ms},{hid})"
@@ -248,7 +267,46 @@ def anim_tags(kind: str, d_ms: int, leaving: bool, x: float, y: float, H: int, a
         return f"\\pos({x:.1f},{y:.1f})\\t(0,{d_ms},2,\\fscx165\\fscy165){fade}"
     if kind == "blur":
         return f"\\pos({x:.1f},{y:.1f}){vis}\\t(0,{d_ms},\\blur14{hid})"
+    if kind == "spin":
+        return f"\\pos({x:.1f},{y:.1f})\\frz{{R}}\\t(0,{d_ms},2,\\frz{{R-14}}\\fscx80\\fscy80){fade}"
+    if kind == "drop":
+        return f"\\move({x:.1f},{y:.1f},{x:.1f},{y + 2.2 * off:.1f},0,{d_ms}){fade}"
+    if kind == "stretch":
+        return f"\\pos({x:.1f},{y:.1f})\\t(0,{d_ms},2,\\fscx0){fade}"
+    if kind == "flip":
+        return f"\\pos({x:.1f},{y:.1f})\\t(0,{d_ms},2,\\fscy0){fade}"
     return f"\\pos({x:.1f},{y:.1f}){vis}\\t(0,{d_ms},{hid})"
+
+
+LOOPS = {"pulse": 0.9, "heartbeat": 1.2, "wiggle": 0.5, "swing": 1.6, "blink": 0.8}
+
+
+def loop_tags(kind: str, dur: float, rot: float, alphas: tuple[float, float, float]) -> str:
+    """Tags that keep an element moving while it is on screen (repeated \\t steps, straight lines between them:
+    the preview draws the same zig-zag)."""
+    P = LOOPS.get(kind)
+    if not P or dur < P:
+        return ""
+    steps: list[tuple[float, str]]
+    r = -rot
+    if kind == "pulse":
+        steps = [(0.5, "\\fscx106\\fscy106"), (1.0, "\\fscx100\\fscy100")]
+    elif kind == "heartbeat":
+        steps = [(0.1, "\\fscx112\\fscy112"), (0.25, "\\fscx100\\fscy100"), (0.35, "\\fscx108\\fscy108"), (0.5, "\\fscx100\\fscy100")]
+    elif kind in ("wiggle", "swing"):
+        amp = 3.0 if kind == "wiggle" else 7.0
+        steps = [(0.25, f"\\frz{r + amp:.2f}"), (0.75, f"\\frz{r - amp:.2f}"), (1.0, f"\\frz{r:.2f}")]
+    else:                                               # blink
+        dim = "".join(f"\\{n}a{_a(1 - (1 - al) * 0.3)}" for n, al in zip("134", alphas))
+        full = "".join(f"\\{n}a{_a(al)}" for n, al in zip("134", alphas))
+        steps = [(0.5, dim), (1.0, full)]
+    out, n = [], min(150, int(dur / P))
+    for i in range(n):
+        prev = 0.0
+        for frac, tags in steps:
+            out.append(f"\\t({int((i + prev) * P * 1000)},{int((i + frac) * P * 1000)},{tags})")
+            prev = frac
+    return "".join(out)
 
 
 class Ass:
@@ -273,10 +331,24 @@ class Ass:
         rest = f"\\1a{_a(alphas[0])}\\3a{_a(alphas[1])}\\4a{_a(alphas[2])}"
 
         def tags(kind, ms, leaving):
-            return anim_tags(kind, ms, leaving, x, y, self.H, alphas).replace("{R+14}", f"{-rot + 14:.2f}").replace("{R}", f"{-rot:.2f}")
+            return (anim_tags(kind, ms, leaving, x, y, self.H, alphas).replace("{R+14}", f"{-rot + 14:.2f}")
+                    .replace("{R-14}", f"{-rot - 14:.2f}").replace("{R}", f"{-rot:.2f}"))
         if di > 0:
-            self.ev(a, a + di, style, "{" + base + tags(ain["type"], int(di * 1000), False) + fin + body, layer)
-        self.ev(a + di, b - do, style, "{" + base + f"\\pos({x:.1f},{y:.1f}){rest}" + fin + body, layer)
+            first = body
+            if ain["type"] == "type" and not drawing:          # letter by letter, evenly over the entrance
+                chars = [c for c in body.replace("\\N", "\n")]
+                n = max(1, sum(1 for c in chars if c != "\n"))
+                cs, used, first = di * 100 / n, 0, ""
+                for i, c in enumerate([c for c in chars]):
+                    if c == "\n":
+                        first += "\\N"
+                        continue
+                    k = int(round(cs * (sum(1 for q in chars[:i + 1] if q != "\n")))) - used
+                    used += k
+                    first += "{\\ko" + str(max(0, k)) + "}" + c
+            self.ev(a, a + di, style, "{" + base + tags(ain["type"], int(di * 1000), False) + fin + first, layer)
+        loop = loop_tags(str((e.get("anim_loop") or {}).get("type") or ""), b - do - a - di, rot, alphas)
+        self.ev(a + di, b - do, style, "{" + base + f"\\pos({x:.1f},{y:.1f}){rest}{loop}" + fin + body, layer)
         if do > 0:
             self.ev(b - do, b, style, "{" + base + tags(aout["type"], int(do * 1000), True) + fin + body, layer)
 
@@ -450,14 +522,14 @@ def enter_exit(it: dict, dur: float, W: int, H: int) -> tuple[str, str, bool]:
     for key, leaving in (("enter", False), ("exit", True)):
         tr = it.get(key) or {}
         kind, d = str(tr.get("type") or ""), min(float(tr.get("dur") or 0.5), dur / 2)
-        if kind in ("", "none", "fade") or d <= 0:
+        if kind in ("", "none", "fade", "flash", "dip") or d <= 0:
             continue
         # p: 1 -> 0 while entering (eased), 0 -> 1 while leaving
         if not leaving:
             p = f"pow(clip(1-(t-{st:.3f})/{d:.3f},0,1),2)"
         else:
             p = f"pow(clip((t-{st + dur - d:.3f})/{d:.3f},0,1),2)"
-        if kind == "zoom":
+        if kind in ("zoom", "grow"):
             zoom = True
             continue
         sign = {"left": (1, 0), "right": (-1, 0), "up": (0, 1), "down": (0, -1)}.get(kind.replace("slide-", ""), (0, 0))
@@ -467,6 +539,8 @@ def enter_exit(it: dict, dur: float, W: int, H: int) -> tuple[str, str, bool]:
             xs.append(f"{sign[0] * W}*{p}")
         if sign[1]:
             ys.append(f"{sign[1] * H}*{p}")
+    if str(it.get("motion") or "") in ("push", "pull"):
+        zoom = True
     return ("+" + "+".join(xs)) if xs else "", ("+" + "+".join(ys)) if ys else "", zoom
 
 
@@ -476,7 +550,13 @@ def scale_anim(it: dict, dur: float, t: str = "t") -> str:
     for key, leaving in (("enter", False), ("exit", True)):
         tr = it.get(key) or {}
         d = min(float(tr.get("dur") or 0.5), dur / 2)
-        if str(tr.get("type") or "") != "zoom" or d <= 0:
+        amp = {"zoom": 0.3, "grow": -0.45}.get(str(tr.get("type") or ""))
+        if amp is None or d <= 0:
             continue
-        parts.append(f"0.3*pow(clip(1-{t}/{d:.3f},0,1),2)" if not leaving else f"0.3*pow(clip(({t}-{dur - d:.3f})/{d:.3f},0,1),2)")
+        parts.append(f"{amp}*pow(clip(1-{t}/{d:.3f},0,1),2)" if not leaving else f"{amp}*pow(clip(({t}-{dur - d:.3f})/{d:.3f},0,1),2)")
+    mo = str(it.get("motion") or "")
+    if mo == "push":                                    # slow push-in over the whole clip
+        parts.append(f"0.12*clip({t}/{dur:.3f},0,1)")
+    elif mo == "pull":
+        parts.append(f"0.12*(1-clip({t}/{dur:.3f},0,1))")
     return "(1+" + "+".join(parts) + ")" if parts else "1"

@@ -93,6 +93,8 @@ export function Stage({ p, assets, events, sel, setSel, begin, update }: Props) 
           const ts = transAt(it, Math.min(t, end));
           box.style.opacity = String(active ? clamp(it.opacity ?? 1, 0, 1) * fade * ts.op : 0);
           box.style.pointerEvents = active ? "auto" : "none";
+          const tint = box.querySelector<HTMLElement>(".ve-tint");
+          if (tint) { tint.style.opacity = String(active ? ts.ta : 0); if (ts.tint) tint.style.background = ts.tint; }
           box.style.transform = `translate(${ts.dx * pr.width * kk}px, ${ts.dy * pr.height * kk}px)${it.rot ? ` rotate(${it.rot}deg)` : ""}${ts.sc !== 1 ? ` scale(${ts.sc})` : ""}`;
         }
         if (active && pr.cursor?.media === it.media && tr.kind === "video" && t < end) curItem = it;
@@ -123,8 +125,12 @@ export function Stage({ p, assets, events, sel, setSel, begin, update }: Props) 
         const a = animAt(e, t, pr.height);
         node.style.pointerEvents = "auto";
         node.style.opacity = String(a.op);
-        node.style.transform = `translate(-50%, -50%) translate(${a.dx * kk}px, ${a.dy * kk}px) rotate(${(e.rot || 0) + a.rot}deg) scale(${a.sc})`;
+        node.style.transform = `translate(-50%, -50%) translate(${a.dx * kk}px, ${a.dy * kk}px) rotate(${(e.rot || 0) + a.rot}deg) scale(${a.sc * a.sx}, ${a.sc * a.sy})`;
         node.style.filter = a.blur > 0.05 ? `blur(${a.blur * kk}px)` : "";
+        if (e.kind === "text" && e.anim_in?.type === "type") {            // typewriter: letters appear one by one
+          const sp = node.querySelectorAll<HTMLElement>("span[data-c]"), n = a.chars < 0 ? sp.length : Math.min(sp.length, Math.floor(a.chars * sp.length) + 1);
+          if (node.dataset.n !== String(n)) { node.dataset.n = String(n); sp.forEach((c, i) => { c.style.visibility = i < n ? "visible" : "hidden"; }); }
+        }
       }
       if (capRef.current) {
         const node = capRef.current, st = pr.captions || ({} as El);
@@ -255,6 +261,7 @@ export function Stage({ p, assets, events, sel, setSel, begin, update }: Props) 
         {m.kind === "image" ? <img src={src} style={inner} draggable={false} alt="" />
           : src ? <video ref={ref as any} src={src} style={inner} preload="auto" playsInline />
           : <div className="ve-wait" style={inner}><span className="spin" /> {a?.error || "Preparing preview…"}</div>}
+        <i className="ve-vig ve-tint" style={{ opacity: 0 }} />
         {v.vignette > 0.01 && <i className="ve-vig" style={{ background: `radial-gradient(ellipse at center, transparent ${62 - v.vignette * 22}%, rgba(0,0,0,${0.25 + v.vignette * 0.5}) 118%)` }} />}
       </div>
     );
@@ -263,7 +270,8 @@ export function Stage({ p, assets, events, sel, setSel, begin, update }: Props) 
     const ref = (n: HTMLElement | null) => { if (n) elBoxes.current.set(e.id, n); else elBoxes.current.delete(e.id); };
     const base: React.CSSProperties = { left: (e.x ?? 0.5) * p.width * k, top: (e.y ?? 0.5) * p.height * k, opacity: 0 };
     const down = (ev: React.PointerEvent) => { setSel([e.id]); drag(ev, { id: e.id, x: e.x ?? 0.5, y: e.y ?? 0.5, rot: e.rot }, "move", e.kind === "text" ? "text" : "shape"); };
-    if (e.kind === "text") return <div key={e.id} ref={ref} className="ve-el ve-text" style={{ ...base, ...textCss(e, p.height, k) }} onPointerDown={down}>{e.text}</div>;
+    if (e.kind === "text") return <div key={e.id + (e.anim_in?.type === "type" ? "t" : "")} ref={ref} className="ve-el ve-text" style={{ ...base, ...textCss(e, p.height, k) }} onPointerDown={down}>
+      {e.anim_in?.type === "type" ? [...(e.text || "")].map((c, i) => (c === "\n" ? "\n" : <span key={i} data-c="">{c}</span>)) : e.text}</div>;
     const w = (e.w ?? 0.2) * p.width * k, h = (e.h ?? 0.2) * p.height * k, sw = (e.width || 6) * (p.height / 1080) * k;
     if (e.shape === "blur") return <div key={e.id} ref={ref} className="ve-el ve-blur" style={{ ...base, width: w, height: h, backdropFilter: `blur(${(e.strength ?? 0.6) * 22 * (p.height / 1080) * k}px)` }} onPointerDown={down} />;
     const pad = sw * 2 + 4;
