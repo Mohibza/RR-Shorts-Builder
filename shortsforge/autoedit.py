@@ -4,7 +4,6 @@ It listens (where is someone talking?), looks at what the hands did (clicks, typ
 recorder) and decides:
 
 * dead air with nothing happening      -> cut
-* long stretches of typing / waiting   -> played faster
 * "um", "uh" and obvious retakes       -> cut
 * clicks and typing                    -> smooth zoom to that spot
 * speech                               -> captions
@@ -24,7 +23,7 @@ from typing import Callable, Optional
 from . import vfx
 from .pacing import is_filler
 
-DEFAULTS = {"cuts": True, "fillers": True, "retakes": True, "speedup": True, "zoom": True, "zoom_level": 1.7,
+DEFAULTS = {"cuts": True, "fillers": True, "retakes": True, "speedup": False, "zoom": True, "zoom_level": 1.7,
             "captions": True, "chapters": True, "audio": True, "cursor": True, "min_gap": 0.9}
 
 
@@ -240,6 +239,10 @@ def _typing_spots(video: str, bursts: list[tuple[float, float]], moves: list, ca
     return out
 
 
+HOLD = 1.0      # seconds without a click or a key before the zoom lets go; shorter gaps just move the view
+TAIL = 1.2      # how long the zoom stays after the last click / key before it glides back out
+
+
 def _zoom_blocks(targets: list, z: float) -> list[dict]:
     """Zoom blocks from targets [t, x, y, kind] (timeline time; kind 'click' or 'type'; x None = keep the place).
 
@@ -249,34 +252,36 @@ def _zoom_blocks(targets: list, z: float) -> list[dict]:
     lo, hi = half, 1 - half
     blocks: list[dict] = []
     cur: Optional[dict] = None
-    for t, x, y, kind in sorted(targets, key=lambda q: q[0]):
-        live = cur is not None and t - cur["last"] <= 4.0
+    for tg in sorted(targets, key=lambda q: q[0]):
+        t, x, y, kind = tg[:4]
+        burst = tg[4] if len(tg) > 4 else None          # points of one typing burst keep the zoom alive between them
+        live = cur is not None and (t - cur["last"] <= HOLD or (burst is not None and cur.get("burst") == burst))
         if x is None:
             if live:
-                cur["last"], cur["kind"] = t, kind          # still typing: keep holding
+                cur["last"], cur["kind"], cur["burst"] = t, kind, burst          # still typing: keep holding
             continue
         if not (0 <= x <= 1 and 0 <= y <= 1):
             continue
         # is the new spot comfortably inside what the zoom shows right now?
         if live and abs(x - cur["cx"]) <= half * 0.72 and abs(y - cur["cy"]) <= half * 0.72:
-            cur["last"], cur["kind"] = t, kind
+            cur["last"], cur["kind"], cur["burst"] = t, kind, burst
             continue
-        nb = {"cx": min(hi, max(lo, x)), "cy": min(hi, max(lo, y)), "last": t, "kind": kind}
+        nb = {"cx": min(hi, max(lo, x)), "cy": min(hi, max(lo, y)), "last": t, "kind": kind, "burst": burst}
         if live:                                              # glide straight from the old spot to the new one
             cur["end"] = max(cur["start"] + 0.5, t - 0.6)
             nb["start"] = cur["end"]
         else:
             if cur is not None:
-                cur["end"] = cur["last"] + (1.5 if cur["kind"] == "type" else 1.7)
+                cur["end"] = min(cur["last"] + TAIL, max(cur["last"] + 0.3, t - 0.75))    # be back out before the next zoom in
             nb["start"] = max(cur["end"] if cur else 0.0, t - 0.7)
         blocks.append(nb)
         cur = nb
     if cur is not None:
-        cur["end"] = cur["last"] + (1.5 if cur["kind"] == "type" else 1.7)
+        cur["end"] = cur["last"] + TAIL
     out = []
     for i, b in enumerate(blocks):
         chained = i + 1 < len(blocks) and abs(blocks[i + 1]["start"] - b["end"]) < 0.01
-        if b["end"] - b["start"] < (0.5 if chained else 1.2):
+        if b["end"] - b["start"] < (0.5 if chained else 1.0):
             continue
         out.append({"id": _nid(), "kind": "zoom", "start": round(b["start"], 2), "dur": round(b["end"] - b["start"], 2),
                     "cx": round(b["cx"], 3), "cy": round(b["cy"], 3), "z": z, "ease": 0.55, "auto": True})
@@ -287,7 +292,18 @@ def run(p: dict, opts: dict, progress: Callable[[str, float], None], cancel: Opt
         settings=None) -> tuple[dict, dict]:
     """Returns (new project, summary). `p` is not changed."""
     o = {**DEFAULTS, **(opts or {})}
+    o["speedup"] = False                      # nothing is ever fast-forwarded: typing plays at its real speed
     p = copy.deepcopy(p)
+    # Running Auto Edit again starts from the video as it was before the last run (it replaces the old result
+    # instead of cutting what was already cut).
+    if p.get("pre_auto"):
+        pre = copy.deepcopy(p["pre_auto"])
+        p["items"], p["markers"] = pre["items"], pre.get("markers") or []
+        p["els"] = pre.get("els") or []
+        p.pop("chapters", None)
+    else:
+        p["pre_auto"] = copy.deepcopy({"items": p["items"], "markers": p.get("markers") or [],
+                                       "els": [e for e in p.get("els") or [] if not e.get("auto")]})
     fps = int(p.get("fps") or 30)
     media = {m["id"]: m for m in p["media"]}
     tracks = {t["id"]: t for t in p["tracks"]}
@@ -449,12 +465,15 @@ def run(p: dict, opts: dict, progress: Callable[[str, float], None], cancel: Opt
         bursts = [b for b in _merge([(k, k + 0.01) for k in ev["keys"]], 2.5)
                   if b[1] - b[0] >= 0.4 and to_tl(b[0]) is not None]
         spots = _typing_spots(m["path"], bursts, ev["moves"], ev.get("carets") or [], progress, cancel) if m["kind"] == "video" else []
-        targets = [[c[0], c[1], c[2], "click"] for c in clicks]
-        for burst in spots:
+        # a click in the middle of typing (picking a suggestion, placing the cursor) must not pull the camera away
+        typing_tl = [(to_tl(a), to_tl(b)) for a, b in bursts if to_tl(b) is not None]
+        targets = [[c[0], c[1], c[2], "click"] for c in clicks
+                   if not any(a + 0.3 < c[0] < b for a, b in typing_tl)]
+        for bi, burst in enumerate(spots):
             for t_src, x, y in burst:
                 tt = to_tl(t_src)
                 if tt is not None:
-                    targets.append([tt, x, y, "type"])
+                    targets.append([tt, x, y, "type", bi])
         zs = _zoom_blocks(targets, float(o["zoom_level"]))
         dead = [(x["t0"], x["t1"]) for x in actions if x["kind"] == "cut"]
         zs = [z for z in zs if not any(a <= z["start"] + 0.7 and z["start"] + z["dur"] - 1.7 <= b for a, b in dead)]

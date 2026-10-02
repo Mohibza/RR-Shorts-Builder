@@ -820,7 +820,7 @@ def _make_handler(app: App):
         old = _edit_project(new["id"])
         have = {m["id"] for m in new.get("media", [])}
         new["media"] = list(new.get("media", [])) + [m for m in old.get("media", []) if m["id"] not in have]
-        for k in ("created", "recording", "events", "markers", "cursor", "captions", "chapters", "auto"):
+        for k in ("created", "recording", "events", "markers", "cursor", "captions", "chapters", "auto", "pre_auto"):
             if k in old and k not in new:
                 new[k] = old[k]
         veditor.save(new)

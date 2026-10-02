@@ -86,7 +86,7 @@ function MediaTab({ p, assets, onImport, onAdd }: { p: EProject; assets: Record<
 }
 
 function AutoTab({ p, auto, run, cancel }: { p: EProject; auto: AutoJob | null; run: (o: Record<string, any>) => void; cancel: () => void }) {
-  const [o, setO] = useState<Record<string, any>>({ cuts: true, fillers: true, retakes: true, speedup: true, zoom: true, zoom_level: 1.7, captions: true, chapters: true, audio: true, cursor: true });
+  const [o, setO] = useState<Record<string, any>>({ cuts: true, fillers: true, retakes: true, zoom: true, zoom_level: 1.7, captions: true, chapters: true, audio: true, cursor: true });
   const set = (k: string, v: any) => setO((x) => ({ ...x, [k]: v }));
   const rec = !!p.cursor?.events, running = auto?.state === "running", s = p.auto;
   const T = (k: string, label: string, hint: string, off?: boolean) => <Toggle on={!!o[k] && !off} onChange={(v) => set(k, v)} label={label} hint={off ? "Needs a recording made in Studio (it logs where you click)" : hint} />;
@@ -96,8 +96,7 @@ function AutoTab({ p, auto, run, cancel }: { p: EProject; auto: AutoJob | null; 
       {T("cuts", "Cut dead air", "Removes pauses where nobody talks and nothing happens")}
       {T("fillers", "Cut “um” and “uh”", "Needs speech to be recognised")}
       {T("retakes", "Cut repeated takes", "When you restart the same sentence, the first try goes")}
-      {T("speedup", "Speed up typing and waiting", "Long silent stretches where you are busy play 2–4× faster", !rec)}
-      {T("zoom", "Zoom to clicks and typing", "Smooth zoom in where the action is, then back out", !rec)}
+      {T("zoom", "Zoom to clicks and typing", "Zooms in where you click, glides to where you type, and stays until the typing is over", !rec)}
       {o.zoom && rec && <Num label="Zoom" unit="×" min={1.3} max={2.5} step={0.1} value={o.zoom_level} onChange={(v) => set("zoom_level", v)} />}
       {T("cursor", "Click ripples", "A ring spreads from every click", !rec)}
       {T("captions", "Captions", "Writes what you say under the video")}
@@ -105,13 +104,14 @@ function AutoTab({ p, auto, run, cancel }: { p: EProject; auto: AutoJob | null; 
       {T("audio", "Clean up the voice", "Removes background hiss and evens out the volume (heard in the export)")}
       {running ? (
         <div className="ve-autobusy"><Progress frac={auto!.frac} label={auto!.stage} /><Btn small kind="ghost" onClick={cancel}>Stop</Btn></div>
-      ) : <Btn kind="primary" icon="wand" onClick={() => run({ ...o, zoom: o.zoom && rec, speedup: o.speedup && rec, cursor: o.cursor && rec })}>Run Auto Edit</Btn>}
+      ) : <Btn kind="primary" icon="wand" onClick={() => run({ ...o, zoom: o.zoom && rec, speedup: false, cursor: o.cursor && rec })}>{p.auto ? "Run Auto Edit again" : "Run Auto Edit"}</Btn>}
+      {p.auto && !running && <p className="muted small">Running again starts from the video as it was before the last Auto Edit, so changes made since then are replaced.</p>}
       {auto?.state === "failed" && <p className="bad-line"><Icon name="alert" size={15} /> {auto.error}</p>}
       {!running && s && (
         <div className="ve-autosum">
           <b>Last Auto Edit</b>
           <span>{tc(s.before || 0, 30, false)} → {tc(s.after || 0, 30, false)} ({Math.round(s.saved || 0)} s shorter)</span>
-          <span>{s.cuts || 0} cuts · {s.speedups || 0} speed-ups · {s.zooms || 0} zooms · {s.captions || 0} captions{s.chapters ? ` · ${s.chapters} chapters` : ""}</span>
+          <span>{s.cuts || 0} cuts · {s.zooms || 0} zooms · {s.captions || 0} captions{s.chapters ? ` · ${s.chapters} chapters` : ""}</span>
           {!s.voice && <span className="muted">No speech was found, so cuts follow your mouse and keyboard activity only.</span>}
         </div>
       )}

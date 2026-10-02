@@ -21,7 +21,7 @@ export type Item = { id: string; track: string; media: string; start: number; in
   opacity: number; crop: [number, number, number, number]; fx?: Fx; enter?: Trans; exit?: Trans; tail?: number; motion?: string; afx?: { denoise?: boolean; level?: boolean }; auto?: string };
 export type EProject = { id: string; name: string; created: number; updated: number; width: number; height: number;
   fps: number; bg: string; media: Media[]; tracks: Track[]; items: Item[]; markers?: number[]; recording?: string;
-  els?: El[]; cursor?: CursorFx; captions?: El; chapters?: { t: number; title: string }[]; auto?: Record<string, any> };
+  els?: El[]; cursor?: CursorFx; captions?: El; chapters?: { t: number; title: string }[]; auto?: Record<string, any>; pre_auto?: Record<string, any> };
 export type Assets = { key: string; poster: string; strip: string; strip_n: number; wave: string; proxy: string;
   need_proxy: boolean; ready: boolean; error: string };
 export type EExport = { id: string; project: string; state: string; frac: number; file: string; error: string; name: string;
