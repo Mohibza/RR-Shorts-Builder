@@ -2,7 +2,7 @@
 ; Built automatically by build_installer.bat
 
 #define AppName "Rebels Revolt Shorts"
-#define AppVersion "2.9.8"
+#define AppVersion "2.9.9"
 #define AppPublisher "EagleEye Codes"
 
 [Setup]

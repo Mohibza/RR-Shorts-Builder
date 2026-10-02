@@ -728,7 +728,7 @@ def _win_loop(rec: Recorder) -> None:
     def sampler():
         pt, last = wintypes.POINT(), (None, None)
         btn = {0x01: False, 0x02: False, 0x04: False}
-        keys_down, n = False, 0
+        keys_down, n = frozenset(), 0
         while not stop_ev.is_set():
             n += 1
             try:
@@ -742,12 +742,14 @@ def _win_loop(rec: Recorder) -> None:
                         last = (pt.x, pt.y)
                         ev.add("move", pt.x, pt.y)
                 if n % 2:
-                    any_down = any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in KEYS)
-                    if any_down and not keys_down and time.time() - ev.last_key > 0.1:
+                    # a key press = a key that is down now and wasn't a moment ago. (Fast typing overlaps keys:
+                    # the next one goes down before the last is released, and each must still count.)
+                    down = frozenset(vk for vk in KEYS if user32.GetAsyncKeyState(vk) & 0x8000)
+                    if down - keys_down and time.time() - ev.last_key > 0.06:
                         ev.last_key = time.time()
                         cx, cy = caret()
                         ev.add("key", cx, cy)
-                    keys_down = any_down
+                    keys_down = down
             except Exception:
                 pass
             time.sleep(1 / 60)

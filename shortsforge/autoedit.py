@@ -525,9 +525,21 @@ def run(p: dict, opts: dict, progress: Callable[[str, float], None], cancel: Opt
                "zooms": 0, "captions": 0, "chapters": 0, "voice": has_voice, "events": have_events}
     if o["zoom"] and have_events:
         # typing: from the first key to the last (pauses up to 2.5 s belong to the same burst), in video time
-        bursts = [b for b in _merge([(k, k + 0.01) for k in ev["keys"]], 2.5)
-                  if b[1] - b[0] >= 0.4 and to_tl(b[0]) is not None]
-        spots = _typing_spots(m["path"], bursts, ev["moves"], ev.get("carets") or [], progress, cancel) if m["kind"] == "video" else []
+        # (older recordings logged fewer key presses when typing fast, so pauses up to 4 s still count as one burst)
+        bursts = [b for b in _merge([(k, k + 0.01) for k in ev["keys"]], 4.0)
+                  if b[1] - b[0] >= 0.15 and to_tl(b[0]) is not None]
+        spots = _typing_spots(m["path"], bursts, ev["moves"], ev.get("carets") or [], progress, cancel) if m["kind"] == "video" \
+            else [[[b[0], None, None], [b[1], None, None]] for b in bursts]
+        # Typing ALWAYS gets the zoom. When the picture didn't show where the text is, use the best guess: the
+        # last click before the typing (the field that was clicked into), else where the mouse was, else the middle.
+        for (s0, _s1), burst in zip(bursts, spots):
+            if any(sp[1] is None for sp in burst):
+                before = [c for c in ev["clicks"] if s0 - 20 <= c[0] <= s0 + 0.3]
+                rest = [mv for mv in ev["moves"] if mv[0] <= s0]
+                gx, gy = (before[-1][1], before[-1][2]) if before else (rest[-1][1], rest[-1][2]) if rest else (0.5, 0.5)
+                for sp in burst:
+                    if sp[1] is None:
+                        sp[1], sp[2] = min(1.0, max(0.0, gx)), min(1.0, max(0.0, gy))
         # Three kinds of click:
         #   into a text field (typing follows)  -> full zoom, the view then glides with the text
         #   on something that reacts            -> a light zoom
