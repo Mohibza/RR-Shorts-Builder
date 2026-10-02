@@ -23,7 +23,7 @@ from typing import Callable, Optional
 from . import vfx
 from .pacing import is_filler
 
-DEFAULTS = {"cuts": True, "fillers": True, "retakes": True, "speedup": False, "zoom": True, "zoom_level": 1.7, "zoom_hold": 3.0,
+DEFAULTS = {"cuts": True, "fillers": True, "retakes": True, "speedup": False, "zoom": True, "zoom_level": 1.7, "zoom_hold": 3.0, "zoom_click": 0.5,
             "captions": True, "chapters": True, "audio": True, "cursor": True, "min_gap": 0.9}
 
 
@@ -243,30 +243,87 @@ HOLD = 3.0      # default: stay zoomed (and glide to the next spot) when the nex
 TAIL = 1.2      # how long the zoom stays after the last click / key before it glides back out
 
 
-def _zoom_blocks(targets: list, z: float, hold: float = HOLD) -> list[dict]:
-    """Zoom blocks from targets [t, x, y, kind] (timeline time; kind 'click' or 'type'; x None = keep the place).
+def _click_effects(video: str, clicks_src: list, moves: list, wide: bool = False, cancel=None) -> list[bool]:
+    """For every click (video time): did it DO something? A click on a button, menu, link or tab changes the
+    picture; a click on empty space doesn't. Found by comparing the frame just before with the frame just after."""
+    out = [False] * len(clicks_src)
+    try:
+        import cv2
+        import numpy as np
+        cap = cv2.VideoCapture(video)
+    except Exception:
+        return [True] * len(clicks_src)                      # can't look: treat every click as meaningful
 
-    The camera goes to a click. When typing starts somewhere that is not inside the zoomed view, it glides over to
-    the text; if the text is already in view it stays put. It holds for as long as the typing goes on."""
-    half = 0.5 / z
-    lo, hi = half, 1 - half
+    def frame(t: float):
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
+        ok, fr = cap.read()
+        if not ok or fr is None:
+            return None
+        h, w = fr.shape[:2]
+        g = cv2.cvtColor(cv2.resize(fr, (480, max(2, int(480 * h / w))), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+        return cv2.GaussianBlur(g, (3, 3), 0)
+
+    def mouse(t: float):
+        last = None
+        for mv in moves:
+            if mv[0] > t:
+                break
+            last = mv
+        return last
+    before, after = (0.5, 1.2) if wide else (0.1, 0.5)       # older recordings: click times are less exact
+    try:
+        for i, c in enumerate(clicks_src):
+            if cancel is not None and cancel.is_set():
+                break
+            a, b = frame(c[0] - before), frame(c[0] + after)
+            if a is None or b is None or a.shape != b.shape:
+                out[i] = True
+                continue
+            d = (cv2.absdiff(a, b) > 22).astype(np.uint8)
+            m0, m1 = mouse(c[0] - before), mouse(c[0] + after)
+            for mm in (m0, m1):                               # the pointer itself moving is not an effect
+                if mm is not None and m0 is not None and m1 is not None and (abs(m0[1] - m1[1]) > 0.004 or abs(m0[2] - m1[2]) > 0.006):
+                    cv2.circle(d, (int(mm[1] * d.shape[1]), int(mm[2] * d.shape[0])), 11, 0, -1)
+            d = cv2.morphologyEx(d, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+            out[i] = int(d.sum()) >= 24
+    finally:
+        cap.release()
+    return out
+
+
+def _zoom_blocks(targets: list, z: float, hold: float = HOLD) -> list[dict]:
+    """Zoom blocks from targets [t, x, y, kind, burst, zoom] (timeline time; kind 'click' or 'type'; x None = keep
+    the place; zoom = how far in this target wants the view, default `z`).
+
+    The camera follows the current activity. A click that does something gets a light zoom; typing gets the full
+    zoom and keeps it until the typing is over. When the next activity comes soon (within `hold`), the view glides
+    to it; when it comes later, the view has gone back to the full screen and zooms in again."""
     blocks: list[dict] = []
     cur: Optional[dict] = None
     for tg in sorted(targets, key=lambda q: q[0]):
         t, x, y, kind = tg[:4]
         burst = tg[4] if len(tg) > 4 else None          # points of one typing burst keep the zoom alive between them
+        zt = float(tg[5]) if len(tg) > 5 and tg[5] else z
         live = cur is not None and (t - cur["last"] <= hold or (burst is not None and cur.get("burst") == burst))
         if x is None:
-            if live:
+            if not live:
+                continue
+            if zt <= cur["z"] + 1e-6:
                 cur["last"], cur["kind"], cur["burst"] = t, kind, burst          # still typing: keep holding
-            continue
+                continue
+            x, y = cur["cx"], cur["cy"]                   # typing started under a light zoom: go in closer, same place
         if not (0 <= x <= 1 and 0 <= y <= 1):
             continue
-        # is the new spot comfortably inside what the zoom shows right now?
-        if live and abs(x - cur["cx"]) <= half * 0.72 and abs(y - cur["cy"]) <= half * 0.72:
-            cur["last"], cur["kind"], cur["burst"] = t, kind, burst
-            continue
-        nb = {"cx": min(hi, max(lo, x)), "cy": min(hi, max(lo, y)), "last": t, "kind": kind, "burst": burst}
+        # is the new spot comfortably inside what the zoom shows right now (and is the zoom close enough for it)?
+        if live and zt <= cur["z"] + 1e-6:
+            half = 0.5 / cur["z"]
+            if abs(x - cur["cx"]) <= half * 0.72 and abs(y - cur["cy"]) <= half * 0.72:
+                cur["last"], cur["kind"], cur["burst"] = t, kind, burst
+                continue
+        zb = max(zt, cur["z"]) if live and kind == "click" and cur["kind"] == "type" and burst is None else zt
+        half = 0.5 / zb
+        nb = {"cx": min(1 - half, max(half, x)), "cy": min(1 - half, max(half, y)), "last": t, "kind": kind,
+              "burst": burst, "z": zb}
         if live:                                              # glide straight from the old spot to the new one
             cur["end"] = max(cur["start"] + 0.5, t - 0.65)
             nb["start"] = cur["end"]
@@ -282,7 +339,7 @@ def _zoom_blocks(targets: list, z: float, hold: float = HOLD) -> list[dict]:
     for i, b in enumerate(blocks):
         chained = i + 1 < len(blocks) and abs(blocks[i + 1]["start"] - b["end"]) < 0.01
         follows = bool(out) and abs(out[-1]["start"] + out[-1]["dur"] - b["start"]) < 0.02
-        if follows and b["end"] - b["start"] < 1.0:
+        if follows and b["end"] - b["start"] < 1.0 and b["z"] <= out[-1]["z"] + 1e-6:
             # a detour of under a second (a quick click while typing): don't swing the camera there and back,
             # stay on what was being shown
             out[-1]["dur"] = round(b["end"] - out[-1]["start"], 2)
@@ -290,7 +347,7 @@ def _zoom_blocks(targets: list, z: float, hold: float = HOLD) -> list[dict]:
         if b["end"] - b["start"] < (0.5 if chained else 1.0):
             continue
         out.append({"id": _nid(), "kind": "zoom", "start": round(b["start"], 2), "dur": round(b["end"] - b["start"], 2),
-                    "cx": round(b["cx"], 3), "cy": round(b["cy"], 3), "z": z, "ease": 0.65, "auto": True})
+                    "cx": round(b["cx"], 3), "cy": round(b["cy"], 3), "z": round(b["z"], 2), "ease": 0.65, "auto": True})
     return out
 
 
@@ -471,14 +528,30 @@ def run(p: dict, opts: dict, progress: Callable[[str, float], None], cancel: Opt
         bursts = [b for b in _merge([(k, k + 0.01) for k in ev["keys"]], 2.5)
                   if b[1] - b[0] >= 0.4 and to_tl(b[0]) is not None]
         spots = _typing_spots(m["path"], bursts, ev["moves"], ev.get("carets") or [], progress, cancel) if m["kind"] == "video" else []
-        # the camera follows whatever is happening right now: a click, then the typing, then the next click
-        targets = [[c[0], c[1], c[2], "click"] for c in clicks]
+        # Three kinds of click:
+        #   into a text field (typing follows)  -> full zoom, the view then glides with the text
+        #   on something that reacts            -> a light zoom
+        #   on nothing (the picture stays as is) -> no zoom, only the click ripple
+        zfull = float(o["zoom_level"])
+        zlight = 1 + (zfull - 1) * float(o.get("zoom_click", 0.5))
+        progress("Looking at what each click did", 0.86)
+        src_clicks = [c for c in ev["clicks"] if to_tl(c[0]) is not None]
+        acted = _click_effects(m["path"], src_clicks, ev["moves"], abs(float(cur.get("offset") or 0)) > 0.01, cancel) \
+            if m["kind"] == "video" else [True] * len(src_clicks)
+        targets = []
+        for c, did in zip(src_clicks, acted):
+            into_text = any(0 <= b0 - c[0] <= 3.0 for b0, _b1 in bursts)
+            if into_text:
+                targets.append([to_tl(c[0]), c[1], c[2], "click", None, zfull])
+            elif did:
+                targets.append([to_tl(c[0]), c[1], c[2], "click", None, zlight])
+        summary["plain_clicks"] = len(src_clicks) - len(targets)
         for bi, burst in enumerate(spots):
             for t_src, x, y in burst:
                 tt = to_tl(t_src)
                 if tt is not None:
-                    targets.append([tt, x, y, "type", bi])
-        zs = _zoom_blocks(targets, float(o["zoom_level"]), max(0.0, float(o.get("zoom_hold", HOLD))))
+                    targets.append([tt, x, y, "type", bi, zfull])
+        zs = _zoom_blocks(targets, zfull, max(0.0, float(o.get("zoom_hold", HOLD))))
         dead = [(x["t0"], x["t1"]) for x in actions if x["kind"] == "cut"]
         zs = [z for z in zs if not any(a <= z["start"] + 0.7 and z["start"] + z["dur"] - 1.7 <= b for a, b in dead)]
         p["els"] += zs

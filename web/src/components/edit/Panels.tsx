@@ -86,7 +86,7 @@ function MediaTab({ p, assets, onImport, onAdd }: { p: EProject; assets: Record<
 }
 
 function AutoTab({ p, auto, run, cancel }: { p: EProject; auto: AutoJob | null; run: (o: Record<string, any>) => void; cancel: () => void }) {
-  const [o, setO] = useState<Record<string, any>>({ cuts: true, fillers: true, retakes: true, zoom: true, zoom_level: 1.7, zoom_hold: 3, captions: true, chapters: true, audio: true, cursor: true });
+  const [o, setO] = useState<Record<string, any>>({ cuts: true, fillers: true, retakes: true, zoom: true, zoom_level: 1.7, zoom_hold: 3, zoom_click: 0.5, captions: true, chapters: true, audio: true, cursor: true });
   const set = (k: string, v: any) => setO((x) => ({ ...x, [k]: v }));
   const rec = !!p.cursor?.events, running = auto?.state === "running", s = p.auto;
   const T = (k: string, label: string, hint: string, off?: boolean) => <Toggle on={!!o[k] && !off} onChange={(v) => set(k, v)} label={label} hint={off ? "Needs a recording made in Studio (it logs where you click)" : hint} />;
@@ -99,7 +99,8 @@ function AutoTab({ p, auto, run, cancel }: { p: EProject; auto: AutoJob | null; 
       {T("zoom", "Zoom to clicks and typing", "Zooms in where you click, glides to where you type, and stays until the typing is over", !rec)}
       {o.zoom && rec && <Num label="Zoom" unit="×" min={1.3} max={2.5} step={0.1} value={o.zoom_level} onChange={(v) => set("zoom_level", v)} />}
       {o.zoom && rec && <Num label="Stay in" unit="s" min={0} max={10} step={0.5} value={o.zoom_hold} onChange={(v) => set("zoom_hold", v)} />}
-      {o.zoom && rec && <p className="muted small">The view follows your clicks and typing. If the next one comes within “Stay in” seconds it glides there while staying zoomed; after that it zooms back out to the full screen.</p>}
+      {o.zoom && rec && <Num label="Clicks" unit="%" min={0} max={100} step={5} value={Math.round((o.zoom_click ?? 0.5) * 100)} onChange={(v) => set("zoom_click", v / 100)} />}
+      {o.zoom && rec && <p className="muted small">Typing in a text field gets the full zoom and keeps it until the typing is over. A click that does something (button, menu, link) gets a lighter zoom, set by “Clicks”. A click on nothing only shows the ripple. When the next action comes within “Stay in” seconds the view glides to it; later than that, it has zoomed back out and zooms in again.</p>}
       {T("cursor", "Click ripples", "A ring spreads from every click", !rec)}
       {T("captions", "Captions", "Writes what you say under the video")}
       {T("chapters", "Chapters from markers", "Each marker you dropped while recording starts a chapter")}
@@ -113,7 +114,7 @@ function AutoTab({ p, auto, run, cancel }: { p: EProject; auto: AutoJob | null; 
         <div className="ve-autosum">
           <b>Last Auto Edit</b>
           <span>{tc(s.before || 0, 30, false)} → {tc(s.after || 0, 30, false)} ({Math.round(s.saved || 0)} s shorter)</span>
-          <span>{s.cuts || 0} cuts · {s.zooms || 0} zooms · {s.captions || 0} captions{s.chapters ? ` · ${s.chapters} chapters` : ""}</span>
+          <span>{s.cuts || 0} cuts · {s.zooms || 0} zooms{s.plain_clicks ? ` · ${s.plain_clicks} clicks with ripple only` : ""} · {s.captions || 0} captions{s.chapters ? ` · ${s.chapters} chapters` : ""}</span>
           {!s.voice && <span className="muted">No speech was found, so cuts follow your mouse and keyboard activity only.</span>}
         </div>
       )}
